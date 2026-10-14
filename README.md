@@ -6,7 +6,7 @@ Move your paw above an 8×8 depth sensor to shape X, Y and Z, find a note, open 
 
 | Bearamin | What it does | What you need |
 | --- | --- | --- |
-| [Bearamin Lite](bearamin-lite/README.md) | Gesture-controlled Eurorack CV and gates, plus USB and Bluetooth MIDI | Bearamin Lite hardware with an ESP32-S3 Matrix |
+| [Bearamin Lite](bearamin-lite/README.md) | Gesture-controlled Eurorack CV and gates, plus USB and Bluetooth MIDI | Optical VL53L7CX sensor  paired with an ESP32-S3 Matrix |
 | [Bearamin Virtual](bearamin-virtual/README.md) | Gesture control for VCV Rack and USB MIDI for your DAW | VL53L7CX sensor and an RP2040-Zero carrier |
 | [Bearamin](bearamin/README.md) | A specialist nerd tool for droners: five sound and CV modes, presets, and a browser interface | Sensor head, MatrixCore, Wi-Fi sidecar, and a dsp.coffee DPT |
 
@@ -21,6 +21,8 @@ The shared **[Bearamin Field Guide](https://actuallysparky.github.io/bearamin/)*
 **[Watch “Bearamin Jazz” (2:29)](bearamin/media/bearamin-jazz.mp4?raw=1)**
 
 ## Make a Bearamin
+
+Want one but don't wanna singe your fur with a soldering iron? Stay tuned - built modules available soon from Hive Mind Synthesis. 
 
 Each product folder contains its firmware source and current editable KiCad hardware designs. Virtual also includes its VCV Rack 2 plugin. The releases are **beta releases**; start with the instructions for your hardware and the matching firmware.
 
