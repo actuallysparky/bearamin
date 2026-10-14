@@ -1,0 +1,5 @@
+(sym_lib_table
+	(lib (name "Bearamin_Virtual") (type "KiCad") (uri "${KIPRJMOD}/Bearamin_Virtual.kicad_sym") (options "") (descr "Bearamin Virtual C3 and six-pin sensor header"))
+
+(lib (name "Bearamin_Virtual_Review") (type "KiCad") (uri "${KIPRJMOD}/Bearamin_Virtual_Review.kicad_sym") (options "") (descr "2026-10-02 current RP2040 as-designed typed module and six-pin breakout interface"))
+)
