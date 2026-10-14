@@ -1,0 +1,17 @@
+diff --git a/lib/daisy_dpt.cpp b/lib/daisy_dpt.cpp
+index 0d40391..d1f7198 100644
+--- a/lib/daisy_dpt.cpp
++++ b/lib/daisy_dpt.cpp
+@@ -245,8 +245,10 @@ namespace dpt
+         System::Config syscfg;
+         syscfg.Boost();
+ 
+-        auto memory = System::GetProgramMemoryRegion();
+-        if(memory != System::MemoryRegion::INTERNAL_FLASH)
++        auto memory       = System::GetProgramMemoryRegion();
++        auto boot_version = System::GetBootloaderVersion();
++        if(boot_version == System::BootInfo::Version::LT_v6_0
++           && memory != System::MemoryRegion::INTERNAL_FLASH)
+             syscfg.skip_clocks = true;
+ 
+         system.Init(syscfg);

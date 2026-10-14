@@ -160,4 +160,124 @@ class BearaminMotionPredictor
     uint32_t latest_interval_ms_;
 };
 
+// v11 preparation runs with UART parsing, never from the audio callback.  The
+// callback receives an already fast-forwarded keyframe and only performs five
+// bounded recurrence steps per block.
+class BearaminTrajectoryReconstructor
+{
+  public:
+    BearaminTrajectoryReconstructor()
+    {
+        Reset();
+    }
+
+    void Reset()
+    {
+        initialized_ = false;
+        source_epoch_ms_ = 0;
+        for(size_t axis = 0; axis < kAxisCount; ++axis)
+        {
+            current_[axis] = kNeutral;
+            target_[axis] = kNeutral;
+        }
+        decay_per_callback_ = 1.0f;
+    }
+
+    bool Prepare(BearaminBridgePacket& packet, float callback_ms) const
+    {
+        if(packet.protocol_version != kBearaminVersionV11
+           || !ValidBearaminTrajectoryPacket(packet)
+           || callback_ms <= 0.0f)
+            return false;
+        const float tau = static_cast<float>(packet.slew_tau_ms);
+        const uint32_t bounded_age = packet.age_ms > kMaximumSourceAgeMs
+                                         ? kMaximumSourceAgeMs
+                                         : packet.age_ms;
+        const float receipt_decay = expf(-static_cast<float>(bounded_age) / tau);
+        for(size_t axis = 0; axis < kAxisCount; ++axis)
+        {
+            const float start = static_cast<float>(packet.trajectory_start_norm[axis]);
+            const float target = AxisTarget(packet, axis);
+            packet.trajectory_receipt_norm[axis]
+                = target + (start - target) * receipt_decay;
+        }
+        packet.trajectory_decay_per_callback = expf(-callback_ms / tau);
+        packet.trajectory_prepared = true;
+        return true;
+    }
+
+    BearaminBridgePacket Process(const BearaminBridgePacket& input, bool fresh)
+    {
+        BearaminBridgePacket output = input;
+        const bool chaos_active = (input.flags & kBearaminChaosActive) != 0;
+        const bool playable = fresh && input.trajectory_prepared
+                              && (input.flags & kBearaminStale) == 0
+                              && (chaos_active
+                                  || ((input.flags & kBearaminMatrixValid) != 0
+                                      && input.matrix_blob_count > 0));
+        if(!playable)
+        {
+            Reset();
+            return output;
+        }
+        // Heartbeats retain their source epoch.  Do not restart a trajectory
+        // merely because their transport sequence advances.
+        if(!initialized_ || input.source_epoch_ms != source_epoch_ms_)
+        {
+            for(size_t axis = 0; axis < kAxisCount; ++axis)
+            {
+                current_[axis] = input.trajectory_receipt_norm[axis];
+                target_[axis] = AxisTarget(input, axis);
+            }
+            decay_per_callback_ = input.trajectory_decay_per_callback;
+            source_epoch_ms_ = input.source_epoch_ms;
+            initialized_ = true;
+        }
+        WriteAxes(output, current_);
+        for(size_t axis = 0; axis < kAxisCount; ++axis)
+            current_[axis] = target_[axis]
+                             + (current_[axis] - target_[axis])
+                                   * decay_per_callback_;
+        return output;
+    }
+
+  private:
+    static constexpr size_t kAxisCount = 5;
+    static constexpr float kNeutral = 2048.0f;
+    static constexpr uint32_t kMaximumSourceAgeMs = 1000;
+
+    static float AxisTarget(const BearaminBridgePacket& packet, size_t axis)
+    {
+        switch(axis)
+        {
+            case 0: return static_cast<float>(packet.matrix_x_norm);
+            case 1: return static_cast<float>(packet.matrix_y_norm);
+            case 2: return static_cast<float>(packet.matrix_z_norm);
+            case 3: return static_cast<float>(packet.pitch_norm);
+            default: return static_cast<float>(packet.roll_norm);
+        }
+    }
+
+    static uint16_t RoundAxis(float value)
+    {
+        return static_cast<uint16_t>(Clamp(value, 0.0f, 4095.0f) + 0.5f);
+    }
+
+    static void WriteAxes(BearaminBridgePacket& packet,
+                          const float axes[kAxisCount])
+    {
+        packet.matrix_x_norm = RoundAxis(axes[0]);
+        packet.matrix_y_norm = RoundAxis(axes[1]);
+        packet.matrix_z_norm = RoundAxis(axes[2]);
+        packet.pitch_norm = RoundAxis(axes[3]);
+        packet.roll_norm = RoundAxis(axes[4]);
+    }
+
+    bool initialized_;
+    uint32_t source_epoch_ms_;
+    float current_[kAxisCount];
+    float target_[kAxisCount];
+    float decay_per_callback_;
+};
+
 } // namespace dpt_multimode

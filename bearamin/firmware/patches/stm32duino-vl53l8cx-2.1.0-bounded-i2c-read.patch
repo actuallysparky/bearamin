@@ -1,0 +1,34 @@
+diff --git a/src/vl53l8cx.h b/src/vl53l8cx.h
+index 97bf211..2b08027 100644
+--- a/src/vl53l8cx.h
++++ b/src/vl53l8cx.h
+@@ -147,18 +147,26 @@ class VL53L8CX
+         if (size > DEFAULT_I2C_BUFFER_LEN) {
+           while (i < size) {
+             // If still more than DEFAULT_I2C_BUFFER_LEN bytes to go, DEFAULT_I2C_BUFFER_LEN,
+             // else the remaining number of bytes
+             uint8_t current_read_size = (size - i > DEFAULT_I2C_BUFFER_LEN ? DEFAULT_I2C_BUFFER_LEN : size - i);
+-            dev_i2c->requestFrom(((uint8_t)((_dev.platform.address >> 1) & 0x7F)), current_read_size);
+-            while (dev_i2c->available()) {
++            uint8_t received_bytes = dev_i2c->requestFrom(
++              ((uint8_t)((_dev.platform.address >> 1) & 0x7F)), current_read_size);
++            if (received_bytes != current_read_size) {
++              return 1;
++            }
++            while (received_bytes-- > 0 && dev_i2c->available()) {
+               p_values[i] = dev_i2c->read();
+               i++;
+             }
+           }
+         } else {
+-          dev_i2c->requestFrom(((uint8_t)((_dev.platform.address >> 1) & 0x7F)), size);
+-          while (dev_i2c->available()) {
++          uint8_t received_bytes = dev_i2c->requestFrom(
++            ((uint8_t)((_dev.platform.address >> 1) & 0x7F)), size);
++          if (received_bytes != size) {
++            return 1;
++          }
++          while (received_bytes-- > 0 && dev_i2c->available()) {
+             p_values[i] = dev_i2c->read();
+             i++;
+           }

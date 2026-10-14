@@ -1,6 +1,8 @@
 #pragma once
 
 #define BEARAMIN_MATRIX_SENSOR_VL53L7CX 1
+// The original MatrixCore VL53L7CX carrier routes LPR/reset to GPIO5.
+#define BEARAMIN_MATRIX_LPR_PIN 5
 // The installed VL53L7CX is rotated relative to the physical soundfield.
 // This makes raw (x, y) become true-grid (7 - y, 7 - x).
 #define BEARAMIN_RAW_TO_TRUE_GRID_ROTATION_QUARTERS 1

@@ -89,6 +89,18 @@ mm::BearaminBridgeParser bearamin_parser;
 mm::RealtimeSnapshot<mm::BearaminBridgePacket> bearamin_raw_packets;
 mm::BearaminBridgePacket bearamin_audio_packet = {};
 mm::BearaminMotionPredictor bearamin_predictor;
+mm::BearaminTrajectoryReconstructor bearamin_trajectory_reconstructor;
+constexpr float kBearaminAudioCallbackMs = 1.0f;
+uint32_t bearamin_v10_packet_count = 0;
+uint32_t bearamin_v11_packet_count = 0;
+uint32_t bearamin_invalid_trajectory_count = 0;
+uint32_t bearamin_trajectory_correction_count = 0;
+uint32_t bearamin_trajectory_max_correction_norm = 0;
+uint32_t bearamin_stale_transition_count = 0;
+uint32_t bearamin_last_trajectory_diagnostics_ms = 0;
+mm::BearaminBridgePacket bearamin_previous_v11_packet = {};
+bool bearamin_previous_v11_packet_valid = false;
+bool bearamin_bridge_was_fresh = false;
 uint32_t bearamin_last_packet_ms = 0;
 uint32_t bearamin_last_probe_ms = 0;
 uint32_t bearamin_single_wire_ack_start_ms = 0;
@@ -273,6 +285,73 @@ mm::DptPerformanceSnapshot CaptureDptPerformanceSnapshot()
     return snapshot;
 }
 
+uint16_t BearaminTrajectoryTarget(const mm::BearaminBridgePacket& packet,
+                                  size_t                          axis)
+{
+    switch(axis)
+    {
+        case 0: return packet.matrix_x_norm;
+        case 1: return packet.matrix_y_norm;
+        case 2: return packet.matrix_z_norm;
+        case 3: return packet.pitch_norm;
+        default: return packet.roll_norm;
+    }
+}
+
+void RecordBearaminTrajectoryCorrection(const mm::BearaminBridgePacket& packet)
+{
+    if(packet.protocol_version != mm::kBearaminVersionV11)
+        return;
+
+    if(bearamin_previous_v11_packet_valid
+       && packet.source_epoch_ms
+              != bearamin_previous_v11_packet.source_epoch_ms)
+    {
+        const uint32_t elapsed_ms
+            = packet.source_epoch_ms
+              - bearamin_previous_v11_packet.source_epoch_ms;
+        if(elapsed_ms <= 1000)
+        {
+            const float tau
+                = static_cast<float>(bearamin_previous_v11_packet.slew_tau_ms);
+            const float decay = expf(-static_cast<float>(elapsed_ms) / tau);
+            for(size_t axis = 0; axis < 5; ++axis)
+            {
+                const float target
+                    = static_cast<float>(
+                        BearaminTrajectoryTarget(
+                            bearamin_previous_v11_packet, axis));
+                const float expected
+                    = target
+                      + (static_cast<float>(
+                             bearamin_previous_v11_packet
+                                 .trajectory_start_norm[axis])
+                         - target)
+                            * decay;
+                const float received
+                    = static_cast<float>(packet.trajectory_start_norm[axis]);
+                const float difference
+                    = expected >= received ? expected - received
+                                           : received - expected;
+                const uint32_t rounded_difference
+                    = static_cast<uint32_t>(difference + 0.5f);
+                if(rounded_difference > 1)
+                {
+                    bearamin_trajectory_correction_count++;
+                    if(rounded_difference
+                       > bearamin_trajectory_max_correction_norm)
+                    {
+                        bearamin_trajectory_max_correction_norm
+                            = rounded_difference;
+                    }
+                }
+            }
+        }
+    }
+    bearamin_previous_v11_packet = packet;
+    bearamin_previous_v11_packet_valid = true;
+}
+
 const mm::BearaminBridgePacket& RawBearaminPacket()
 {
     return bearamin_raw_packets.Read();
@@ -319,7 +398,7 @@ const int cv_inputs[8] = {
     CV_8,
 };
 
-static constexpr uint32_t kBearaminDptProbeSendMs = 1000;
+static constexpr uint32_t kBearaminDptProbeSendMs = 200;
 static constexpr uint32_t kBearaminPerformanceSendMs = 5000;
 static constexpr uint32_t kBearaminUartBaud = 38400;
 static constexpr uint32_t kBearaminSingleWireAckPulseMs = 2;
@@ -918,10 +997,18 @@ void AudioCallback(AudioHandle::InputBuffer  in,
     audio_callback_count++;
 
     const uint32_t predictor_now = System::GetNow();
-    bearamin_audio_packet = bearamin_predictor.Process(
-        RawBearaminPacket(),
-        predictor_now,
-        BearaminBridgeFresh(predictor_now));
+    const mm::BearaminBridgePacket& raw_packet = RawBearaminPacket();
+    const bool bearamin_fresh = BearaminBridgeFresh(predictor_now);
+    if(raw_packet.protocol_version == mm::kBearaminVersionV11)
+    {
+        bearamin_audio_packet = bearamin_trajectory_reconstructor.Process(
+            raw_packet, bearamin_fresh);
+    }
+    else
+    {
+        bearamin_audio_packet = bearamin_predictor.Process(
+            raw_packet, predictor_now, bearamin_fresh);
+    }
 
     patch.ProcessAllControls();
 
@@ -1167,6 +1254,21 @@ void AcceptBearaminBridgeByte(uint8_t byte)
     mm::BearaminBridgePacket packet;
     if(bearamin_parser.Push(byte, packet))
     {
+        if(packet.protocol_version == mm::kBearaminVersionV11)
+        {
+            if(!bearamin_trajectory_reconstructor.Prepare(
+                   packet, kBearaminAudioCallbackMs))
+            {
+                bearamin_invalid_trajectory_count++;
+                return;
+            }
+            RecordBearaminTrajectoryCorrection(packet);
+            bearamin_v11_packet_count++;
+        }
+        else
+        {
+            bearamin_v10_packet_count++;
+        }
         bearamin_raw_packets.Publish(packet);
         bearamin_last_packet_ms = System::GetNow();
         bearamin_rx_packet_count++;
@@ -2392,6 +2494,9 @@ void SendBearaminBridgeStatus()
     const bool bearamin_fresh
         = current_mode == mm::Mode::BearaminBridge
           && BearaminBridgeFresh(now);
+    if(bearamin_bridge_was_fresh && !bearamin_fresh)
+        bearamin_stale_transition_count++;
+    bearamin_bridge_was_fresh = bearamin_fresh;
     const bool rx_recent = bearamin_rx_last_byte_ms != 0
                            && now - bearamin_rx_last_byte_ms
                                   <= kBearaminRxActivityHoldMs;
@@ -2436,6 +2541,45 @@ void SendBearaminBridgeStatus()
             DirectTransmitBearaminBytes(
                 reinterpret_cast<uint8_t*>(performance),
                 performance_length,
+                25);
+        }
+    }
+
+    if(bearamin_last_trajectory_diagnostics_ms == 0
+       || now - bearamin_last_trajectory_diagnostics_ms
+              >= kBearaminPerformanceSendMs)
+    {
+        bearamin_last_trajectory_diagnostics_ms = now;
+        const mm::BearaminBridgePacket& raw = RawBearaminPacket();
+        const mm::DptPerformanceSnapshot snapshot
+            = CaptureDptPerformanceSnapshot();
+        mm::BearaminTrajectoryDiagnostics diagnostics = {};
+        diagnostics.protocol_version = raw.protocol_version;
+        diagnostics.slew_tau_ms
+            = raw.protocol_version == mm::kBearaminVersionV11
+                  ? raw.slew_tau_ms
+                  : 0;
+        diagnostics.source_epoch_ms = raw.source_epoch_ms;
+        diagnostics.source_age_ms = raw.age_ms;
+        diagnostics.v10_packet_count = bearamin_v10_packet_count;
+        diagnostics.v11_packet_count = bearamin_v11_packet_count;
+        diagnostics.correction_count = bearamin_trajectory_correction_count;
+        diagnostics.max_correction_norm
+            = bearamin_trajectory_max_correction_norm;
+        diagnostics.invalid_keyframe_count = bearamin_invalid_trajectory_count;
+        diagnostics.stale_transitions = bearamin_stale_transition_count;
+        diagnostics.deadline_misses = snapshot.deadline_misses;
+        char trajectory_diagnostics[96] = {};
+        const size_t trajectory_diagnostics_length
+            = mm::EncodeBearaminTrajectoryDiagnosticsLine(
+                diagnostics,
+                trajectory_diagnostics,
+                sizeof(trajectory_diagnostics));
+        if(trajectory_diagnostics_length > 0)
+        {
+            DirectTransmitBearaminBytes(
+                reinterpret_cast<uint8_t*>(trajectory_diagnostics),
+                trajectory_diagnostics_length,
                 25);
         }
     }

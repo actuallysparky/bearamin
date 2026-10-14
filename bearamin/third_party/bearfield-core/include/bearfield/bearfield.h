@@ -203,6 +203,7 @@ struct ProcessedFieldState {
   uint16_t rollNorm12 = kNormCenter;
   uint8_t validCount = 0;
   uint8_t blobCount = 0;
+  uint64_t blobMask = 0;
   uint8_t orientationConfidence = 0;
   uint32_t sourceSequence = 0;
   uint64_t sourceCapturedUs = 0;
@@ -270,6 +271,7 @@ class Processor {
     uint64_t weightedY = 0;
     uint64_t weightSum = 0;
     uint8_t blobCount = 0;
+    next.blobMask = 0;
     for (uint8_t y = 0; y < kGridWidth; ++y) {
       for (uint8_t x = 0; x < kGridWidth; ++x) {
         const uint8_t index = cellIndex(x, y);
@@ -281,6 +283,7 @@ class Processor {
         weightedY += static_cast<uint64_t>(y) * 1000ULL * weight;
         weightSum += weight;
         ++blobCount;
+        next.blobMask |= 1ULL << index;
       }
     }
     next.blobCount = blobCount;

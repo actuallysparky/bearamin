@@ -1,6 +1,9 @@
 #include <Arduino.h>
 #include <ArduinoOTA.h>
 #include <ESPmDNS.h>
+#include <SD.h>
+#include "../../../common/default_preset_store.h"
+#include <SPI.h>
 #include <WebServer.h>
 #include <WiFi.h>
 #include <WiFiUdp.h>
@@ -9,7 +12,9 @@
 #include <esp_system.h>
 #include <stdarg.h>
 
-#if defined(BEARAMIN_TARGET_SIDECAR_C5)
+#if defined(BEARAMIN_TARGET_SIDECAR_C5_REVC_S3_LAYOUT)
+#include "targets/xiao_esp32c5_revc_s3layout.h"
+#elif defined(BEARAMIN_TARGET_SIDECAR_C5)
 #include "targets/xiao_esp32c5.h"
 #else
 #include "targets/xiao_esp32s3.h"
@@ -70,6 +75,10 @@
 #define BEARAMIN_WIFI_PREFER_5GHZ 0
 #endif
 
+#ifndef BEARAMIN_WIFI_PREFER_2GHZ
+#define BEARAMIN_WIFI_PREFER_2GHZ 0
+#endif
+
 #ifndef BEARAMIN_MATRIX_RX_PIN
 #define BEARAMIN_MATRIX_RX_PIN 4
 #endif
@@ -86,16 +95,42 @@
 #define BEARAMIN_DEBUG_TX_PIN 7
 #endif
 
+#ifndef BEARAMIN_SD_CS_PIN
+#define BEARAMIN_SD_CS_PIN 3
+#endif
+
+#ifndef BEARAMIN_SD_SCK_PIN
+#define BEARAMIN_SD_SCK_PIN 7
+#endif
+
+#ifndef BEARAMIN_SD_MISO_PIN
+#define BEARAMIN_SD_MISO_PIN 8
+#endif
+
+#ifndef BEARAMIN_SD_MOSI_PIN
+#define BEARAMIN_SD_MOSI_PIN 9
+#endif
+
+#ifndef BEARAMIN_SD_SPI_HZ
+#define BEARAMIN_SD_SPI_HZ 1000000
+#endif
+
 constexpr uint8_t kMatrixRxPin = BEARAMIN_MATRIX_RX_PIN;
 constexpr uint8_t kMatrixTxPin = BEARAMIN_MATRIX_TX_PIN;
 constexpr int8_t kDebugRxPin = BEARAMIN_DEBUG_RX_PIN;
-constexpr uint8_t kDebugTxPin = BEARAMIN_DEBUG_TX_PIN;
+constexpr int8_t kDebugTxPin = BEARAMIN_DEBUG_TX_PIN;
+constexpr uint8_t kSdCsPin = BEARAMIN_SD_CS_PIN;
+constexpr uint8_t kSdSckPin = BEARAMIN_SD_SCK_PIN;
+constexpr uint8_t kSdMisoPin = BEARAMIN_SD_MISO_PIN;
+constexpr uint8_t kSdMosiPin = BEARAMIN_SD_MOSI_PIN;
+constexpr uint32_t kSdSpiHz = BEARAMIN_SD_SPI_HZ;
 constexpr uint32_t kMatrixBaud = 460800;
 constexpr uint32_t kSerialBaud = 115200;
 constexpr uint32_t kDebugBaud = 115200;
 constexpr uint32_t kWifiTimeoutMs = 30000;
 constexpr uint32_t kWifiPreferredBandAttemptMs = 8000;
 constexpr bool kWifiPrefer5Ghz = BEARAMIN_WIFI_PREFER_5GHZ != 0;
+constexpr bool kWifiPrefer2Ghz = BEARAMIN_WIFI_PREFER_2GHZ != 0;
 constexpr uint32_t kMatrixStaleMs = 500;
 constexpr uint32_t kSidecarStatusMs = 500;
 constexpr uint32_t kEngineeringStreamTimeoutMs = 2500;
@@ -108,21 +143,16 @@ constexpr size_t kCaptureHttpMaxBytes = 8192;
 constexpr size_t kMatrixRxBufferBytes = 4096;
 constexpr uint32_t kCaptureStopWaitMs = 750;
 constexpr uint8_t kWifiDiagRingSize = 48;
-constexpr uint16_t kPresetLineQueueSize = 96;
-constexpr uint16_t kPresetTimeoutMs = 45000;
-constexpr uint16_t kPresetRequestRetryMs = 150;
-constexpr uint16_t kPresetListRetryMs = 500;
-constexpr uint16_t kPresetFirstResponseTimeoutMs = 2500;
-constexpr uint16_t kPresetReadChunkTimeoutMs = 3500;
-constexpr uint8_t kPresetReadMaxAttempts = 3;
 constexpr uint8_t kPresetDefaultMaxAttempts = 5;
 constexpr uint16_t kPresetDefaultRetryMs = 1500;
-constexpr uint16_t kPresetWriteLinePaceMs = 12;
+constexpr uint8_t kPresetSdMountMaxAttempts = 4;
+constexpr uint16_t kPresetSdMountRetryDelayMs = 40;
+constexpr uint32_t kPresetSdMinimumSpiHz = 100000;
 constexpr uint32_t kRuntimeSettingsRetryMs = 1000;
 constexpr size_t kPresetMaxJsonBytes = 12000;
-constexpr size_t kPresetHexChunkBytes = 36;
 constexpr size_t kPresetMaxNameLength = 48;
-constexpr size_t kPresetMaxListedPresets = 32;
+constexpr size_t kPresetMaxListedPresets = 24;
+constexpr const char *kPresetDirectory = "/presets";
 constexpr uint32_t kSoftApRescanMs = 30000;
 constexpr uint32_t kSoftApReconnectWindowMs = 8000;
 constexpr const char *kSoftApSsid = BEARAMIN_SOFTAP_SSID;
@@ -173,7 +203,6 @@ uint32_t dptPerformanceFrames = 0;
 uint32_t matrixAcks = 0;
 uint32_t matrixParserEvents = 0;
 uint32_t commandSequence = 0;
-uint16_t presetSequence = 1;
 uint32_t lastSidecarStatusMs = 0;
 uint32_t lastEngineeringRequestMs = 0;
 uint32_t lastResonatorControlSendMs = 0;
@@ -201,6 +230,10 @@ bool softApReady = false;
 bool debugSerialReady = false;
 bool engineeringStreamEnabled = false;
 bool modeAnnouncementsEnabled = false;
+uint16_t defaultRequestSequence = 0;
+bearamin_sidecar::PresetFrame defaultReply = {};
+bool defaultReplyReady = false;
+bool presetDefaultAvailable = false;
 bool bootControlSyncComplete = false;
 bool bootControlSyncUsedRuntime = false;
 bool runtimeSettingsReceived = false;
@@ -307,15 +340,13 @@ uint16_t logWriteIndex = 0;
 uint16_t logCount = 0;
 uint32_t logSequence = 0;
 bool telemetryLoggingEnabled = false;
-String presetLineQueue[kPresetLineQueueSize];
-uint16_t presetLineHead = 0;
-uint16_t presetLineTail = 0;
 String presetLastError = "";
 String presetLastLine = "";
 String dptRxDebugLine = "";
 bool presetDefaultAttempted = false;
 bool presetDefaultLoaded = false;
 bool presetSdReady = false;
+uint32_t presetSdActiveSpiHz = 0;
 uint8_t presetDefaultAttempts = 0;
 uint32_t presetDefaultNextAttemptMs = 0;
 WifiDiagEvent wifiDiagEvents[kWifiDiagRingSize] = {};
@@ -745,7 +776,7 @@ const char INDEX_HTML[] PROGMEM = R"HTML(
 <section class="mode-block"><div class="mode-copy"><div class="eyebrow">Active DPT mode</div><h2 id="mode_name">Waiting for DPT</h2><p>Selected by the physical DPT CV8 knob. The web UI follows it.</p></div><div id="mode_tabs" class="mode-tabs" role="list" aria-label="Read-only DPT mode positions"></div></section>
 <div class="layout"><section class="surface"><div class="surface-head"><div><h2>Modulation lanes</h2><p>Map a Bearamin axis into each physical DPT control.</p></div><span id="settings_state" class="mono" aria-live="polite"></span></div><div id="cv_in"></div></section><aside><section class="surface"><div class="surface-head"><div><h2>Outputs &amp; patching</h2><p>Current mode signal reference.</p></div></div><div id="outputs" class="outputs"></div></section><section class="surface response"><div class="surface-head"><div><h2>Gesture response</h2><p>Applies to bridge CV movement in every mode.</p></div></div><label class="eyebrow" for="cv_slew">CV slew <strong id="cv_slew_value"></strong></label><input id="cv_slew" type="range" min="0" max="32" step="1" value="16"><div class="subline"><span>Immediate</span><span style="margin-left:auto">Smooth</span></div></section></aside></div><div id="resonator_anchor"></div></section>
 <section id="system_view" hidden><div class="surface-head"><div><div class="eyebrow">System</div><h2>Instrument health and service tools</h2><p>Maintenance is separate from playing controls. Raw sensor traffic stays off until enabled.</p></div><button id="system_close" class="button">← Back to instrument</button></div><div class="system-grid"><div><section id="capture_system" class="surface"><div class="surface-head"><div><h2>Capture</h2><p>Loss-tolerant binary capture, browser persistence, verification, and JSON cooking.</p></div><span id="capture_stage" class="mono">idle</span></div><div id="capture_metrics" class="capture-metrics"></div><div id="capture_errors" class="mono"></div><h3 style="margin-top:12px">Capture library</h3><div id="capture_library" class="capture-library"><span class="mono">loading browser captures</span></div></section><section class="surface" style="margin-top:14px"><div class="surface-head"><div><h2>Signal path</h2><p>Live low-rate status; no engineering stream.</p></div></div><div id="status_rows"></div></section><section id="diag" class="surface" hidden style="margin-top:14px"><div class="surface-head"><div><h2>Live sensor diagnostics</h2><p id="diag_summary">Engineering stream active only while this view is open.</p></div><button id="diag_close" class="button">Close diagnostics</button></div><div id="raw_grid" class="raw-grid"></div><pre id="raw_meta">{}</pre><pre id="wifi_diag" style="margin-top:10px">{}</pre><pre id="json" style="margin-top:10px">{}</pre></section></div><aside class="surface service"><section><h2>Mode announcements</h2><p>Play the SD-card voice prompt when the physical mode dial changes. Leave this off for seamless switching.</p><label class="check"><input id="announce_modes" type="checkbox"> Announce modes</label><span id="announce_modes_state" class="mono" aria-live="polite"></span></section><section><h2>MatrixCore OTA</h2><p>Temporarily enables MatrixCore Wi-Fi and accepts an OTA upload for 90 seconds.</p><label class="check"><input id="ota_confirm" type="checkbox"> I stopped capture and confirmed the intended image.</label><div class="action-row"><button id="matrix_ota_btn" class="button primary">Arm OTA for 90 seconds</button><span id="matrix_ota" class="mono" aria-live="polite"></span></div></section><section><h2>Live sensor diagnostics</h2><p>Enables the 64-cell engineering stream only while this view is open.</p><button id="eng" class="button">Open live diagnostics</button></section><section><h2>Support snapshot</h2><p>Download the current status without raw sensor history.</p><button id="support_download" class="button">Download diagnostics</button></section><section><h2>Firmware</h2><div class="status-row"><strong>Sidecar</strong><span id="firmware">—</span></div><div class="status-row"><strong>DPT protocol</strong><span id="protocol">—</span></div></section></aside></div></section>
-<div id="preset_modal" class="modal-backdrop" hidden><section id="save_panel" class="surface modal-panel" hidden><div class="surface-head"><div><div class="eyebrow">Presets / Save</div><h2>Save the current instrument setup</h2></div><button class="button preset_close">Close</button></div><div class="dialog-grid"><div><label class="eyebrow" for="preset_name">Save a named copy</label><input id="preset_name" class="text-input" maxlength="48" placeholder="preset name"><p class="mono" style="margin-top:7px">Stores mappings, CV slew, and reflected DPT state. CV8 mode ownership remains physical.</p><div class="action-row"><button id="settings_save_sd" class="button primary">Save to DPT SD</button><button id="settings_download" class="button">Download JSON</button></div></div><div class="surface default-card"><div class="eyebrow">Boot preset</div><h3>★ default <span class="badge">Loads on startup</span></h3><p class="mono" style="margin-top:6px">default is the one persistent preset Bearamin restores after boot. Named presets remain unchanged.</p><div class="action-row"><button id="preset_default_save" class="button primary">Overwrite default</button></div></div></div><span id="preset_save_state" class="mono" aria-live="polite"></span></section><section id="load_panel" class="surface modal-panel" hidden><div class="surface-head"><div><div class="eyebrow">Presets / Load</div><h2>Load a preset</h2><p>Loading applies mappings and settings now; it never changes CV8 ownership or boot behavior.</p></div><button class="button preset_close">Close</button></div><div id="preset_list" class="preset-list"></div><div class="action-row"><button id="settings_upload" class="button">Choose JSON</button><input id="settings_file" type="file" accept="application/json,.json" hidden><span id="preset_load_state" class="mono" aria-live="polite"></span></div></section></div>
+<div id="preset_modal" class="modal-backdrop" hidden><section id="save_panel" class="surface modal-panel" hidden><div class="surface-head"><div><div class="eyebrow">Presets / Save</div><h2>Save the current instrument setup</h2></div><button class="button preset_close">Close</button></div><div class="dialog-grid"><div><label class="eyebrow" for="preset_name">Save a named copy</label><input id="preset_name" class="text-input" maxlength="48" placeholder="preset name"><p class="mono" style="margin-top:7px">Stores mappings, CV slew, and reflected DPT state. CV8 mode ownership remains physical.</p><div class="action-row"><button id="settings_save_sd" class="button primary">Save preset</button><button id="settings_download" class="button">Download JSON</button></div></div><div class="surface default-card"><div class="eyebrow">Boot preset</div><h3>★ default <span class="badge">Loads on startup</span></h3><p class="mono" style="margin-top:6px">default is the one persistent preset Bearamin restores after boot. Named presets remain unchanged.</p><div class="action-row"><button id="preset_default_save" class="button primary">Overwrite default</button></div></div></div><span id="preset_save_state" class="mono" aria-live="polite"></span></section><section id="load_panel" class="surface modal-panel" hidden><div class="surface-head"><div><div class="eyebrow">Presets / Load</div><h2>Load a preset</h2><p>Loading applies mappings and settings now; it never changes CV8 ownership or boot behavior.</p></div><button class="button preset_close">Close</button></div><div id="preset_list" class="preset-list"></div><div class="action-row"><button id="settings_upload" class="button">Choose JSON</button><input id="settings_file" type="file" accept="application/json,.json" hidden><span id="preset_load_state" class="mono" aria-live="polite"></span></div></section></div>
 <script>
 const $=id=>document.getElementById(id),modes=[{name:'Modal',mapKey:'rings_resonator',cvIn:['Brightness','Damping','Structure','Position','Reverb mix','Frequency|C0-C4','Bearamin amount','Mode select'],cvOut:['Envelope +','Envelope -','Frequency|V/oct','Bearamin X|bipolar','Bearamin Y|bipolar','Bearamin Z|bipolar'],gate:['Strum pulse','IMU impact'],audio:['Resonator L','Resonator R']},{name:'Sympathetic Strings',mapKey:'rings_resonator',cvIn:['Brightness','Damping','Structure','Position','Reverb mix','Frequency|C0-C4','Bearamin amount','Mode select'],cvOut:['Envelope +','Envelope -','Frequency|V/oct','Bearamin X|bipolar','Bearamin Y|bipolar','Bearamin Z|bipolar'],gate:['Strum pulse','IMU impact'],audio:['Resonator L','Resonator R']},{name:'Karplus-Strong',mapKey:'rings_resonator',cvIn:['Brightness','Damping','Structure','Position','Reverb mix','Frequency|C0-C4','Bearamin amount','Mode select'],cvOut:['Envelope +','Envelope -','Frequency|V/oct','Bearamin X|bipolar','Bearamin Y|bipolar','Bearamin Z|bipolar'],gate:['Strum pulse','IMU impact'],audio:['Resonator L','Resonator R']},{name:'Bearamin FM drone',mapKey:'bearamin_fm',cvIn:['Mod 1 rate','FM1 depth|into carriers','Mod 2 rate','FM2 depth|into mod 1','Base pitch','Stereo spread','Bearamin amount','Mode select'],cvOut:['Mod 1|bipolar LFO','Mod 2|bipolar LFO','Cooked FM|bend CV','Bearamin X|bipolar','Bearamin Y|bipolar','Bearamin Z|bipolar'],gate:['Unused','Unused'],audio:['Input L + FM|unity blend','Input R + FM|unity blend']},{name:'Bearamin CV',cvIn:['Unused','Unused','Unused','Unused','Unused','Unused','Unused','Mode select'],cvOut:['X axis|unipolar','Y axis|unipolar','Z axis|unipolar','X axis|bipolar','Y axis|bipolar','Z axis|bipolar'],gate:['Gesture gate','IMU impact'],audio:['Input L|unity pass-through','Input R|unity pass-through']}],axes=[
 ['none','None'],['x_bipolar','X bipolar'],['y_bipolar','Y bipolar'],['z_bipolar','Z bipolar'],['x_unipolar','X unipolar'],['y_unipolar','Y unipolar'],['z_unipolar','Z unipolar'],['pitch','Pitch'],['roll','Roll'],['spank','Spank']],colors=['#ff806d','#f0b84e','#f5df61','#a5db78','#70d6d8','#d79cff'];let latestDevice=null,engineeringOn=false,wifiDiagLastFetch=0,captureActive=false,captureStatus=null,captureDownloads={};
@@ -755,10 +786,10 @@ function mapControls(mode,lane,d){const a=axisValue(d[`map_${mode}_${lane}_axis`
 function webSourceSelect(key,value,cv5){const opts=cv5?axes.concat([['cv5_wet','CV5 wet control']]):axes;return `<select class="select" data-res-setting="${key}">${opts.map(([x,t])=>`<option value="${x}"${x===value?' selected':''}>${t}</option>`).join('')}</select>`}function webSlider(key,value,min,max,suffix='%'){return `<div><input type="range" min="${min}" max="${max}" step="1" value="${value}" data-res-setting="${key}" data-res-output="${key}_value"><span id="${key}_value" class="mono">${value}${suffix}</span></div>`}function reverbLpDisplay(value){const a=Math.max(0,Math.min(.999,+value/100)),hz=Math.min(24000,-48000*Math.log(1-a)/(2*Math.PI));return hz>=1000?(hz/1000).toFixed(hz<10000?1:0)+' kHz':Math.round(hz)+' Hz'}function webLpSlider(key,value){return `<div><input type="range" min="0" max="100" step="1" value="${value}" data-res-setting="${key}" data-res-output="${key}_value" data-res-display="lp"><span id="${key}_value" class="mono">${reverbLpDisplay(value)}</span></div>`}function webRadioGroup(key,value,options){return `<fieldset class="web-choice"><legend>Drone voice</legend><div class="choice-options">${options.map(([x,t])=>`<label><input type="radio" name="${key}" value="${x}" data-res-setting="${key}"${x===value?' checked':''}> ${t}</label>`).join('')}</div></fieldset>`}
 function renderResonatorControls(d){let section=$('resonator_web');if(!section){section=document.createElement('section');section.id='resonator_web';section.className='surface web-controls';$('resonator_anchor').before(section)}const active=+d.dpt_mode>=0&&+d.dpt_mode<=2&&!$('instrument_view').hidden;section.hidden=!active;if(!active)return;const reverbOpen=!!document.querySelector('#resonator_reverb_detail[open]'),feedbackMax=95,applied=!!d.resonator_controls_applied,wet=Math.round((((d.dpt_knobs||[])[4]||0)/2.55));section.innerHTML=`<div class="surface-head"><div><h2>Resonator web controls</h2><p>Feedback and drone are mixed into the resonator input. Reverb details now live with CV5 wet/dry below.</p></div><span class="control-status ${applied?'good':''}">${applied?'Active on DPT':'Applying to DPT…'}</span></div><div class="web-control-grid"><article class="web-card feedback-card"><div class="eyebrow">Input loop</div><h3>Feedback</h3><p>Recirculate the resonator output before reverb, capped at 95%.</p><div class="web-row"><label>Amount</label>${webSlider('res_feedback_amount',Math.min(feedbackMax,+d.res_feedback_amount||0),0,feedbackMax)}</div><div class="web-modulation"><label><span>Modulation source</span>${webSourceSelect('res_feedback_source',d.res_feedback_source||'none',true)}</label><label><span>Modulation depth attenuverter</span>${webSlider('res_feedback_depth',+d.res_feedback_depth||0,-100,100)}</label></div></article><div class="web-divider"><span>Separate exciter</span></div><article class="web-card drone-card"><div class="eyebrow">Input generator</div><h3>Drone</h3><p>A continuous tuned exciter mixed with audio, strums, and feedback.</p><label class="web-check"><input type="checkbox" data-res-setting="res_drone_enabled"${d.res_drone_enabled?' checked':''}> Enable drone</label>${webRadioGroup('res_drone_waveform',d.res_drone_waveform||'sine',[['sine','Sine'],['saw','Saw']])}<div class="web-row"><label>Level</label>${webSlider('res_drone_level',+d.res_drone_level||0,0,100)}</div><div class="web-modulation"><label><span>Modulation source</span>${webSourceSelect('res_drone_source',d.res_drone_source||'none',false)}</label><label><span>Modulation depth attenuverter</span>${webSlider('res_drone_depth',+d.res_drone_depth||0,-100,100)}</label></div><p class="depth-help">Depth works as an attenuverter around Level: positive follows the source, negative inverts it, and 0% disables modulation.</p></article><details id="resonator_reverb_detail" class="reverb-detail"${reverbOpen?' open':''}><summary>Reverb detail</summary><div class="reverb-detail-body"><p>CV5 wet/dry remains always-on (${wet}% now). Each depth control is an attenuverter around its saved value: positive follows the modulation source, negative inverts it, and 0% means no modulation.</p>${[['time','Time'],['diffusion','Diffusion'],['lp','Low-pass']].map(([key,label])=>`<div class="web-row"><label>${label}</label>${key==='lp'?webLpSlider(`res_reverb_${key}`,+d[`res_reverb_${key}`]||0):webSlider(`res_reverb_${key}`,+d[`res_reverb_${key}`]||0,0,100)}</div><div class="web-modulation"><label><span>Modulation source</span>${webSourceSelect(`res_reverb_${key}_source`,d[`res_reverb_${key}_source`]||'none',true)}</label><label><span>Modulation depth attenuverter</span>${webSlider(`res_reverb_${key}_depth`,+d[`res_reverb_${key}_depth`]||0,-100,100)}</label></div>`).join('')}</div></details></div>`;const detail=$('resonator_reverb_detail'),reverbLane=document.querySelectorAll('#cv_in .lane')[4];if(detail&&reverbLane)reverbLane.appendChild(detail);document.querySelectorAll('[data-res-setting]').forEach(e=>{if(e.type==='range')e.oninput=()=>{$(e.dataset.resOutput).textContent=e.dataset.resDisplay==='lp'?reverbLpDisplay(e.value):e.value+'%'};e.onchange=()=>{const value=e.type==='checkbox'?(e.checked?1:0):e.value;e.blur();sendSettings(encodeURIComponent(e.dataset.resSetting)+'='+encodeURIComponent(value))}})}
 function renderPanel(d){const index=Number.isFinite(+d.dpt_mode)&&+d.dpt_mode>=0&&+d.dpt_mode<modes.length?+d.dpt_mode:0,mode=modes[index],controlHead=mode.mapKey?'<div class="lane-control-head"><div class="map-control-head"><span></span><span>Modulation depth attenuverter</span></div></div>':'';$('mode_name').textContent=mode.name;$('mode_tabs').innerHTML=modes.map((m,i)=>`<div class="mode-tab ${i===index?'active':''}" role="listitem"${i===index?' aria-current="true"':''}>${esc(m.name)}</div>`).join('');$('cv_in').innerHTML=controlHead+mode.cvIn.map((p,i)=>{const k=Math.max(0,Math.min(255,(d.dpt_knobs||[])[i]||0)),ctl=mode.mapKey&&i<6?mapControls(mode.mapKey,i,d):'',name=lines(p);return `<div class="lane" style="--lane:${colors[i]||'#ddd'}"><div class="lane-number">${i+1}</div><div class="jack"></div><div><div class="slot-title">${i===6?'Global control':i===7?'Hardware-only control':'CV input '+(i+1)}</div><div class="lane-name">${name}</div>${ctl}</div><div>${i<6?`<div class="knob" style="--angle:${(k/255)*270}deg;--lane:${colors[i]}"></div><div class="lane-value">${Math.round(k/2.55)}%</div>`:i===6?'<div class="lane-value">Amount</div>':'<div class="lane-value">CV8</div>'}</div></div>`}).join('');$('outputs').innerHTML=group('CV outputs',mode.cvOut,'CV out')+group('Gate outputs',mode.gate,'Gate')+group('Audio',mode.audio,'Audio out');$('cv_slew').value=Number.isFinite(+d.cv_slew_step)?+d.cv_slew_step:16;$('cv_slew_value').textContent=$('cv_slew').value+' / 32';document.querySelectorAll('[data-setting]').forEach(e=>{if(e.dataset.laneDepth)e.oninput=()=>{const o=e.nextElementSibling,v=depthValue(e.value);o.textContent=v+'%';o.style.setProperty('--depth-position',(v+100)/2+'%')};e.onchange=()=>{e.blur();sendSettings(encodeURIComponent(e.dataset.setting)+'='+encodeURIComponent(e.value))}})}function group(title,items,label){return `<div class="output-group"><h3>${title}</h3>${items.map((v,i)=>`<div class="output-row"><span>${label} ${i+1}</span><strong>${lines(v)}</strong></div>`).join('')}</div>`}
-const mappingConfigs=['bearamin_fm','rings_resonator'],settingsKeys=['announce_modes','fm_drone_ranger','fm_map_x','fm_map_y','fm_map_z','cv_slew_step'];for(const key of mappingConfigs)for(let l=0;l<6;l++)settingsKeys.push(`map_${key}_${l}_axis`,`map_${key}_${l}_depth`);function p(k,v){return encodeURIComponent(k)+'='+encodeURIComponent(v)}function snapshotSettings(){const d=latestDevice||{},settings={};for(const k of settingsKeys)settings[k]=d[k];return{format:'bearamin-settings',version:9,firmware:d.firmware_version||'',saved_at:new Date().toISOString(),settings}}function settingsToParams(s){s=s||{};const out=[p('announce_modes',s.announce_modes?1:0),p('fm_enabled',s.fm_drone_ranger?1:0),p('fm_x',s.fm_map_x||'fm2_frequency'),p('fm_y',s.fm_map_y||'fm1_frequency'),p('fm_z',s.fm_map_z||'fm1_amount')];for(const key of mappingConfigs)for(let l=0;l<6;l++)out.push(p(`map_${key}_${l}_axis`,axisValue(s[`map_${key}_${l}_axis`])),p(`map_${key}_${l}_depth`,depthValue(s[`map_${key}_${l}_depth`])));out.push(p('cv_slew',s.cv_slew_step??16));return out.join('&')}function currentPresetJson(){return JSON.stringify(snapshotSettings(),null,2)+'\n'}function sanitizePresetName(v){return String(v||'').split('').filter(c=>/[A-Za-z0-9_-]/.test(c)).join('').slice(0,48)}
-function closePresets(){$('preset_modal').hidden=true;$('save_panel').hidden=true;$('load_panel').hidden=true}function openPreset(kind){$('preset_modal').hidden=false;$('save_panel').hidden=kind!=='save';$('load_panel').hidden=kind!=='load';if(kind==='save')$('preset_name').focus()}function savePresetToSd(name){name=sanitizePresetName(name||$('preset_name').value);if(!name){$('preset_save_state').textContent='name required';return}$('preset_save_state').textContent='saving';fetch('/presets/save?name='+encodeURIComponent(name),{method:'POST',headers:{'Content-Type':'application/json'},body:currentPresetJson(),cache:'no-store'}).then(r=>r.json()).then(d=>{if(!d.ok)throw Error(d.error);$('preset_save_state').textContent='saved '+d.filename;setTimeout(closePresets,500)}).catch(()=>{$('preset_save_state').textContent='save error'})}function renderPresetList(d){const list=(d.presets||[]).slice().sort((a,b)=>(a.name==='default'?-1:b.name==='default'?1:a.name.localeCompare(b.name)));$('preset_list').innerHTML=list.length?list.map(x=>`<div class="preset-row ${x.name==='default'?'default-card':''}"><div><strong>${x.name==='default'?'★ ':''}${esc(x.name)}</strong>${x.name==='default'?'<p><span class="badge">Boot preset</span> Loads on startup</p>':'<p>Applies settings now; boot behavior unchanged</p>'}</div><button class="button ${x.name==='default'?'primary':''}" data-preset="${esc(x.name)}">${x.name==='default'?'Reload default':'Load'}</button></div>`).join(''):'<div class="mono">no SD presets</div>';document.querySelectorAll('[data-preset]').forEach(b=>b.onclick=()=>loadPresetFromSd(b.dataset.preset))}function showLoadPanel(){openPreset('load');$('preset_load_state').textContent='loading';fetch('/presets.json',{cache:'no-store'}).then(r=>r.json()).then(d=>{renderPresetList(d);$('preset_load_state').textContent=d.ok?(d.presets||[]).length+' presets':d.error||'SD unavailable'}).catch(()=>{$('preset_load_state').textContent='preset list error'})}function loadPresetFromSd(name){$('preset_load_state').textContent='loading';fetch('/presets/load?name='+encodeURIComponent(name),{method:'POST',cache:'no-store'}).then(r=>r.json()).then(d=>{if(d.ok===false)throw Error();latestDevice=d;renderPanel(d);$('preset_load_state').textContent='loaded '+name;setTimeout(closePresets,500)}).catch(()=>{$('preset_load_state').textContent='load error'})}function downloadSettingsFile(){const a=document.createElement('a'),u=URL.createObjectURL(new Blob([currentPresetJson()],{type:'application/json'}));a.href=u;a.download='bearamin-settings-'+new Date().toISOString().replace(/[:.]/g,'-')+'.json';a.click();URL.revokeObjectURL(u)}function loadSettingsFile(file){if(!file)return;file.text().then(JSON.parse).then(data=>{if(data.format!=='bearamin-settings'||data.version!==9||!data.settings)throw Error('preset_version');return sendSettings(settingsToParams(data.settings))}).then(closePresets).catch(()=>{$('preset_load_state').textContent='upload requires preset v9'})}
+const mappingConfigs=['bearamin_fm','rings_resonator'],settingsKeys=['fm_drone_ranger','fm_map_x','fm_map_y','fm_map_z','cv_slew_step','res_feedback_amount','res_feedback_source','res_feedback_depth','res_drone_enabled','res_drone_waveform','res_drone_level','res_drone_source','res_drone_depth','res_reverb_time','res_reverb_time_source','res_reverb_time_depth','res_reverb_diffusion','res_reverb_diffusion_source','res_reverb_diffusion_depth','res_reverb_lp','res_reverb_lp_source','res_reverb_lp_depth','res_frequency_quantization'];for(const key of mappingConfigs)for(let l=0;l<6;l++)settingsKeys.push(`map_${key}_${l}_axis`,`map_${key}_${l}_depth`);function p(k,v){return encodeURIComponent(k)+'='+encodeURIComponent(v)}function snapshotSettings(){const d=latestDevice||{},settings={};for(const k of settingsKeys)settings[k]=d[k];return{format:'bearamin-settings',version:10,firmware:d.firmware_version||'',saved_at:new Date().toISOString(),settings}}function settingsToParams(s){s=s||{};const out=[p('fm_enabled',s.fm_drone_ranger?1:0),p('fm_x',s.fm_map_x||'fm2_frequency'),p('fm_y',s.fm_map_y||'fm1_frequency'),p('fm_z',s.fm_map_z||'fm1_amount')];for(const key of mappingConfigs)for(let l=0;l<6;l++)out.push(p(`map_${key}_${l}_axis`,axisValue(s[`map_${key}_${l}_axis`])),p(`map_${key}_${l}_depth`,depthValue(s[`map_${key}_${l}_depth`])));out.push(p('cv_slew',s.cv_slew_step??16));return out.join('&')}function currentPresetJson(){return JSON.stringify(snapshotSettings(),null,2)+'\n'}function sanitizePresetName(v){return String(v||'').split('').filter(c=>/[A-Za-z0-9_-]/.test(c)).join('').slice(0,47)}
+function closePresets(){$('preset_modal').hidden=true;$('save_panel').hidden=true;$('load_panel').hidden=true}function openPreset(kind){$('preset_modal').hidden=false;$('save_panel').hidden=kind!=='save';$('load_panel').hidden=kind!=='load';if(kind==='save')$('preset_name').focus()}function savePreset(name){name=sanitizePresetName(name||$('preset_name').value);if(!name){$('preset_save_state').textContent='name required';return}$('preset_save_state').textContent='saving';fetch('/presets/save?name='+encodeURIComponent(name),{method:'POST',cache:'no-store'}).then(r=>r.json()).then(d=>{if(!d.ok)throw Error(d.error);$('preset_save_state').textContent='saved '+d.filename;setTimeout(closePresets,500)}).catch(()=>{$('preset_save_state').textContent='save error'})}function renderPresetList(d){const list=(d.presets||[]).slice().sort((a,b)=>(a.name==='default'?-1:b.name==='default'?1:a.name.localeCompare(b.name)));$('preset_list').innerHTML=list.length?list.map(x=>`<div class="preset-row ${x.name==='default'?'default-card':''}"><div><strong>${x.name==='default'?'★ ':''}${esc(x.name)}</strong>${x.name==='default'?'<p><span class="badge">Boot preset</span> Loads on startup</p>':'<p>Applies settings now; boot behavior unchanged</p>'}</div><button class="button ${x.name==='default'?'primary':''}" data-preset="${esc(x.name)}">${x.name==='default'?'Reload default':'Load'}</button></div>`).join(''):'<div class="mono">no saved presets</div>';document.querySelectorAll('[data-preset]').forEach(b=>b.onclick=()=>loadPreset(b.dataset.preset))}function showLoadPanel(){openPreset('load');$('preset_load_state').textContent='loading';fetch('/presets.json',{cache:'no-store'}).then(r=>r.json()).then(d=>{renderPresetList(d);$('preset_load_state').textContent=d.ok?(d.presets||[]).length+' presets':d.error||'preset list error'}).catch(()=>{$('preset_load_state').textContent='preset list error'})}function loadPreset(name){$('preset_load_state').textContent='loading';fetch('/presets/load?name='+encodeURIComponent(name),{method:'POST',cache:'no-store'}).then(r=>r.json()).then(d=>{if(d.ok===false)throw Error();latestDevice=d;renderPanel(d);$('preset_load_state').textContent='loaded '+name;setTimeout(closePresets,500)}).catch(()=>{$('preset_load_state').textContent='load error'})}function downloadSettingsFile(){const a=document.createElement('a'),u=URL.createObjectURL(new Blob([currentPresetJson()],{type:'application/json'}));a.href=u;a.download='bearamin-settings-'+new Date().toISOString().replace(/[:.]/g,'-')+'.json';a.click();URL.revokeObjectURL(u)}function loadSettingsFile(file){if(!file)return;file.text().then(JSON.parse).then(data=>{if(data.format!=='bearamin-settings'||data.version!==10||!data.settings)throw Error('preset_version');return sendSettings(settingsToParams(data.settings))}).then(closePresets).catch(()=>{$('preset_load_state').textContent='upload requires preset v10'})}
 function setView(system){$('instrument_view').hidden=system;$('system_view').hidden=!system;if(!system&&engineeringOn)setEngineering(false)}function renderAnnouncementSetting(d){$('announce_modes').checked=!!d.announce_modes;$('announce_modes_state').textContent=d.announce_modes_applied===d.announce_modes?'Applied on DPT':'Applying…'}function renderRawGrid(d){$('raw_grid').innerHTML=Array.from({length:64},(_,i)=>{const v=+(d.cells_mm||[])[i]||0,c=v===0?'zero':v<25?'near':v<900?'play':'far';return `<div class="raw-cell ${c}">${v}</div>`}).join('');$('raw_meta').textContent=JSON.stringify(d,null,2)}function setEngineering(on){engineeringOn=on;$('diag').hidden=!on;fetch('/engineering/stream?enabled='+(on?1:0),{cache:'no-store'}).catch(()=>{});if(on)pollEngineering()}function pollEngineering(){if(!engineeringOn)return;fetch('/engineering/matrix.json',{cache:'no-store'}).then(r=>r.json()).then(renderRawGrid).catch(()=>{$('raw_meta').textContent='engineering stream unavailable'})}function pollWifiDiag(){if(!engineeringOn||Date.now()-wifiDiagLastFetch<2500)return;wifiDiagLastFetch=Date.now();fetch('/wifi/diag.json',{cache:'no-store'}).then(r=>r.json()).then(d=>{$('wifi_diag').textContent=JSON.stringify(d,null,2)}).catch(()=>{$('wifi_diag').textContent='Wi-Fi diagnostics unavailable'})}function triggerMatrixOta(){if(!$('ota_confirm').checked){$('matrix_ota').textContent='confirm preflight first';return}$('matrix_ota').textContent='arming';$('matrix_ota_btn').disabled=true;fetch('/matrixcore/ota',{method:'POST',cache:'no-store'}).catch(()=>{$('matrix_ota').textContent='request failed'}).finally(()=>setTimeout(()=>{$('matrix_ota_btn').disabled=false},1200))}function downloadSupport(){const a=document.createElement('a'),u=URL.createObjectURL(new Blob([JSON.stringify(latestDevice||{},null,2)],{type:'application/json'}));a.href=u;a.download='bearamin-support-'+Date.now()+'.json';a.click();URL.revokeObjectURL(u)}
-async function poll(){try{const d=await(await fetch('/status.json',{cache:'no-store'})).json();latestDevice=d;const playable=!d.core_link_stale&&d.dpt_ready&&d.matrix_ready;$('readiness').textContent=playable?'Ready to play':'Instrument needs attention';$('ready_dot').className='dot';$('path_status').textContent=d.core_link_stale?'MatrixCore link stale':d.dpt_ready?'Ready':'DPT offline';$('matrix').textContent=d.matrix_ready?`8×8 · ${Number(d.matrix_effective_hz||0).toFixed(1)} Hz source`:'Offline';$('gate').textContent=d.synthetic_gate?'Open':'Closed';$('gate').className=d.synthetic_gate?'good':'';$('impact').textContent=d.impact_gate?'Hit '+d.impact_velocity:'Idle';$('network').textContent=d.network_mode+' · '+(d.sta_ip||d.softap_ip||'offline');$('firmware').textContent=d.firmware_version||'bearamin-sidecar-matrix-poc';$('protocol').textContent='v'+(d.dpt_protocol_version||'—');const ota=d.matrixcore_ota_active?'receiving':d.matrixcore_ota_mode?'armed':'idle';$('matrix_ota').textContent=ota==='idle'?'':ota;$('status_rows').innerHTML=[['Sidecar','Wi-Fi web host',d.web_ready?'Ready':'Offline'],['MatrixCore',`VL53L7CX sensor and DPT bridge · frame age ${d.core_age_ms||0} ms`,d.core_link_stale?'Stale':'Ready'],['Center gate','Any valid center zone in musical range',d.synthetic_gate?'Open':'Closed'],['DPT','Physical CV8 reports '+(modes[d.dpt_mode]?.name||'mode'),d.dpt_ready?'Ready':'Offline'],['Preset storage','DPT SD · default loads at boot',d.preset_sd_ready?'Ready':'Checking']].map(x=>`<div class="status-row"><strong>${x[0]}</strong><span>${x[1]}</span><strong class="${x[2]==='Offline'||x[2]==='Stale'?'bad':''}">${x[2]}</strong></div>`).join('');$('diag_summary').textContent=engineeringOn?'Canonical 64-cell 8×8 stream active.':'Engineering stream idle';renderAnnouncementSetting(d);if(engineeringOn){$('json').textContent=JSON.stringify(d,null,2);pollEngineering();pollWifiDiag()}renderPanel(d)}catch(e){$('readiness').textContent='Web connection error';$('ready_dot').className='dot attention'}}
+async function poll(){try{const d=await(await fetch('/status.json',{cache:'no-store'})).json();latestDevice=d;const playable=!d.core_link_stale&&d.dpt_ready&&d.matrix_ready;$('readiness').textContent=playable?'Ready to play':'Instrument needs attention';$('ready_dot').className='dot';$('path_status').textContent=d.core_link_stale?'MatrixCore link stale':d.dpt_ready?'Ready':'DPT offline';$('matrix').textContent=d.matrix_ready?`8×8 · ${Number(d.matrix_effective_hz||0).toFixed(1)} Hz source`:'Offline';$('gate').textContent=d.synthetic_gate?'Open':'Closed';$('gate').className=d.synthetic_gate?'good':'';$('impact').textContent=d.impact_gate?'Hit '+d.impact_velocity:'Idle';$('network').textContent=d.network_mode+' · '+(d.sta_ip||d.softap_ip||'offline');$('firmware').textContent=d.firmware_version||'bearamin-sidecar-matrix-poc';$('protocol').textContent='v'+(d.dpt_protocol_version||'—');const ota=d.matrixcore_ota_active?'receiving':d.matrixcore_ota_mode?'armed':'idle';$('matrix_ota').textContent=ota==='idle'?'':ota;$('status_rows').innerHTML=[['Sidecar','Wi-Fi web host',d.web_ready?'Ready':'Offline'],['MatrixCore',`VL53L7CX sensor and DPT bridge · frame age ${d.core_age_ms||0} ms`,d.core_link_stale?'Stale':'Ready'],['Center gate','Any valid center zone in musical range',d.synthetic_gate?'Open':'Closed'],['DPT','Physical CV8 reports '+(modes[d.dpt_mode]?.name||'mode'),d.dpt_ready?'Ready':'Offline'],['Boot preset','default loads on startup',d.preset_default_loaded?'Loaded':d.boot_control_sync_source==='matrix_runtime'?'Session retained':d.preset_default_attempted?'Not loaded':'Checking']].map(x=>`<div class="status-row"><strong>${x[0]}</strong><span>${x[1]}</span><strong class="${x[2]==='Offline'||x[2]==='Stale'?'bad':''}">${x[2]}</strong></div>`).join('');$('diag_summary').textContent=engineeringOn?'Canonical 64-cell 8×8 stream active.':'Engineering stream idle';renderAnnouncementSetting(d);if(engineeringOn){$('json').textContent=JSON.stringify(d,null,2);pollEngineering();pollWifiDiag()}renderPanel(d)}catch(e){$('readiness').textContent='Web connection error';$('ready_dot').className='dot attention'}}
 const pollWithoutQuietStatus=poll;poll=async function(){await pollWithoutQuietStatus();const d=latestDevice;if(!d||!d.dpt_control_tx_quiet)return;$('readiness').textContent='Preset transfer';$('ready_dot').className='dot attention';$('path_status').textContent='Preset storage active · motion control remains live';const rows=$('status_rows').querySelectorAll('.status-row');if(rows[3])rows[3].querySelector('strong:last-child').textContent='Preset transfer'}
 const captureWorker=new Worker('/capture-worker.js');
 function captureStamp(){return new Date().toISOString().replace(/[-:]/g,'').replace(/\.\d{3}Z$/,'Z')}
@@ -775,7 +806,7 @@ const setViewBeforeCapture=setView;setView=function(system){setViewBeforeCapture
 function dismissCaptureDetail(){if(captureActive)return;$('capture_stage').textContent='idle';$('capture_metrics').innerHTML='';$('capture_errors').textContent=''}$('capture_stage').title='Click completed status to dismiss';$('capture_stage').onclick=dismissCaptureDetail;
 const matrixSourceSection=document.createElement('section');matrixSourceSection.innerHTML='<h2>Sensor pipeline</h2><p>Production targets use genuine 8×8 depth frames at 15 Hz. CV and display state are time-smoothed at 30 Hz between measurements.</p><div class="mono">8×8 source · 15 Hz sensing · 30 Hz output</div>';document.querySelector('#system_view .service').appendChild(matrixSourceSection);
 const pollBeforePresetTransferStatus=poll;poll=async function(){await pollBeforePresetTransferStatus();const d=latestDevice;if(!d||!d.dpt_control_tx_quiet)return;$('readiness').textContent='Preset transfer';$('ready_dot').className='dot attention';$('path_status').textContent='Preset storage active · motion control remains live';const rows=$('status_rows').querySelectorAll('.status-row');if(rows[5])rows[5].querySelector('strong:last-child').textContent='Preset transfer'}
-$('settings_load').onclick=showLoadPanel;$('settings_save').onclick=()=>openPreset('save');$('settings_save_sd').onclick=()=>savePresetToSd();$('preset_default_save').onclick=()=>savePresetToSd('default');$('settings_download').onclick=downloadSettingsFile;$('settings_upload').onclick=()=>$('settings_file').click();$('settings_file').onchange=e=>{loadSettingsFile(e.target.files&&e.target.files[0]);e.target.value=''};document.querySelectorAll('.preset_close').forEach(b=>b.onclick=closePresets);$('preset_modal').onclick=e=>{if(e.target.id==='preset_modal')closePresets()};$('system_open').onclick=()=>setView(true);$('system_close').onclick=()=>setView(false);$('announce_modes').onchange=e=>sendSettings('announce_modes='+(e.target.checked?1:0));$('eng').onclick=()=>setEngineering(true);$('diag_close').onclick=()=>setEngineering(false);$('matrix_ota_btn').onclick=triggerMatrixOta;$('support_download').onclick=downloadSupport;$('cv_slew').oninput=e=>{$('cv_slew_value').textContent=e.target.value+' / 32'};$('cv_slew').onchange=e=>sendSettings('cv_slew='+encodeURIComponent(e.target.value));$('log_start').onclick=startLog;$('log_stop').onclick=stopLog;document.addEventListener('keydown',e=>{if(e.key==='Escape')closePresets()});window.addEventListener('beforeunload',()=>{if(navigator.sendBeacon)navigator.sendBeacon('/engineering/stream?enabled=0')});setInterval(poll,500);poll();
+$('settings_load').onclick=showLoadPanel;$('settings_save').onclick=()=>openPreset('save');$('settings_save_sd').onclick=()=>savePreset();$('preset_default_save').onclick=()=>savePreset('default');$('settings_download').onclick=downloadSettingsFile;$('settings_upload').onclick=()=>$('settings_file').click();$('settings_file').onchange=e=>{loadSettingsFile(e.target.files&&e.target.files[0]);e.target.value=''};document.querySelectorAll('.preset_close').forEach(b=>b.onclick=closePresets);$('preset_modal').onclick=e=>{if(e.target.id==='preset_modal')closePresets()};$('system_open').onclick=()=>setView(true);$('system_close').onclick=()=>setView(false);$('announce_modes').onchange=e=>sendSettings('announce_modes='+(e.target.checked?1:0));$('eng').onclick=()=>setEngineering(true);$('diag_close').onclick=()=>setEngineering(false);$('matrix_ota_btn').onclick=triggerMatrixOta;$('support_download').onclick=downloadSupport;$('cv_slew').oninput=e=>{$('cv_slew_value').textContent=e.target.value+' / 32'};$('cv_slew').onchange=e=>sendSettings('cv_slew='+encodeURIComponent(e.target.value));$('log_start').onclick=startLog;$('log_stop').onclick=stopLog;document.addEventListener('keydown',e=>{if(e.key==='Escape')closePresets()});window.addEventListener('beforeunload',()=>{if(navigator.sendBeacon)navigator.sendBeacon('/engineering/stream?enabled=0')});setInterval(poll,500);poll();
 const renderPanelWithRequestedCopy=renderPanel;function editingPanelControl(){const a=document.activeElement;return !!(a&&(a.tagName==='SELECT'||a.type==='range'||a.type==='radio'||a.type==='checkbox'))}renderPanel=function(d){if(editingPanelControl())return;renderPanelWithRequestedCopy(d);renderResonatorControls(d);document.querySelectorAll('#cv_in .lane:last-child .lane-value').forEach(e=>e.remove())};function lines(v){v=v==='Bearamin amount'?'Bearamin CV amount':v==='Reverb mix'?'Reverb wet/dry':v;return String(v).split('|').map(x=>`<div>${esc(x)}</div>`).join('')}document.querySelector('.response h2').textContent='Gesture response (slew)';
 settingsKeys.push('res_feedback_amount','res_feedback_source','res_feedback_depth','res_drone_enabled','res_drone_waveform','res_drone_level','res_drone_source','res_drone_depth','res_reverb_time','res_reverb_time_source','res_reverb_time_depth','res_reverb_diffusion','res_reverb_diffusion_source','res_reverb_diffusion_depth','res_reverb_lp','res_reverb_lp_source','res_reverb_lp_depth');const settingsToParamsBase=settingsToParams;settingsToParams=function(s){s=s||{};const out=settingsToParamsBase(s).split('&');[['res_feedback_amount',Math.min(95,s.res_feedback_amount??0)],['res_feedback_source',s.res_feedback_source||'none'],['res_feedback_depth',s.res_feedback_depth??0],['res_drone_enabled',s.res_drone_enabled?1:0],['res_drone_waveform',s.res_drone_waveform==='saw'?'saw':'sine'],['res_drone_level',s.res_drone_level??20],['res_drone_source',s.res_drone_source||'none'],['res_drone_depth',s.res_drone_depth??0],['res_reverb_time',s.res_reverb_time??67],['res_reverb_time_source',s.res_reverb_time_source||'none'],['res_reverb_time_depth',s.res_reverb_time_depth??0],['res_reverb_diffusion',s.res_reverb_diffusion??63],['res_reverb_diffusion_source',s.res_reverb_diffusion_source||'none'],['res_reverb_diffusion_depth',s.res_reverb_diffusion_depth??0],['res_reverb_lp',s.res_reverb_lp??60],['res_reverb_lp_source',s.res_reverb_lp_source||'none'],['res_reverb_lp_depth',s.res_reverb_lp_depth??0]].forEach(([k,v])=>out.push(p(k,v)));return out.join('&')};const renderResonatorControlsBase=renderResonatorControls;renderResonatorControls=function(d){const s=$('resonator_web');if(s&&s.contains(document.activeElement))return;renderResonatorControlsBase(d)};
 settingsKeys.push('res_frequency_quantization');
@@ -2006,6 +2037,10 @@ String stateJson() {
                                                           : "2.4ghz"));
   body += ",\"preset_sd_ready\":";
   body += jsonBool(presetSdReady);
+  body += ",\"preset_sd_spi_hz\":";
+  body += String(presetSdActiveSpiHz);
+  body += ",\"preset_default_available\":";
+  body += jsonBool(presetDefaultAvailable);
   body += ",\"preset_default_attempted\":";
   body += jsonBool(presetDefaultAttempted);
   body += ",\"preset_default_loaded\":";
@@ -2079,6 +2114,12 @@ void handleWifiDiagJson() {
 
 void handleDeviceJson() {
   handleStatusJson();
+}
+
+void handleLorenz() {
+  recordWebRequest();
+  sendCommand(bearamin_sidecar::COMMAND_ENTER_LORENZ, 0);
+  server.send(204);
 }
 
 void handleTelemetryJson() {
@@ -2319,6 +2360,10 @@ void handlePerfJson() {
   const uint32_t now = millis();
   const uint8_t obsActiveSubscribers =
       obsSubscriberLeases.activeCount(now);
+  const uint8_t obsV3Subscribers = obsSubscriberLeases.activeCountForVersion(
+      now, bearamin_obs::kVersionV3);
+  const uint8_t obsV4Subscribers = obsSubscriberLeases.activeCountForVersion(
+      now, bearamin_obs::kVersionV4);
   const uint8_t obsStreamUnion =
       obsSubscriberLeases.streamUnion(now);
   String body = "{\"matrix_bytes\":";
@@ -2354,6 +2399,14 @@ void handlePerfJson() {
   body += jsonBool(obsActiveSubscribers > 0);
   body += ",\"active_subscribers\":";
   body += static_cast<unsigned int>(obsActiveSubscribers);
+  body += ",\"v3_subscribers\":";
+  body += static_cast<unsigned int>(obsV3Subscribers);
+  body += ",\"v4_subscribers\":";
+  body += static_cast<unsigned int>(obsV4Subscribers);
+  body += ",\"protocol_min\":";
+  body += bearamin_obs::kVersionV3;
+  body += ",\"protocol_max\":";
+  body += bearamin_obs::kVersionV4;
   body += ",\"subscriber_capacity\":";
   body += static_cast<unsigned int>(
       bearamin_obs::kMaxSubscribers);
@@ -2474,6 +2527,7 @@ void pollObsSubscriptions(uint32_t now) {
             static_cast<uint32_t>(remoteIp),
             subscription.clientNonce,
             subscription.streams,
+            subscription.version,
             now);
     if (result == bearamin_obs::LEASE_TABLE_FULL) {
       ++obsTableFullRejections;
@@ -2513,12 +2567,14 @@ void sendPendingObsTelemetry(uint32_t now) {
   if (!obsUdpReady) {
     return;
   }
-  const uint8_t streams = obsSubscriberLeases.streamUnion(now);
-  if (streams == 0) {
+  const uint8_t v3Streams = obsSubscriberLeases.streamUnionForVersion(
+      now, bearamin_obs::kVersionV3);
+  const uint8_t v4Streams = obsSubscriberLeases.streamUnionForVersion(
+      now, bearamin_obs::kVersionV4);
+  if (v3Streams == 0 && v4Streams == 0) {
     return;
   }
-  if (obsStatePending &&
-      (streams & bearamin_obs::STREAM_STATE) != 0) {
+  if (obsStatePending) {
     obsStatePending = false;
     bearamin_obs::State state = {};
     state.sourceUptimeMs = latestState.uptimeMs;
@@ -2536,15 +2592,41 @@ void sendPendingObsTelemetry(uint32_t now) {
     state.rollNorm = latestState.rollNorm;
     state.matrixValidCount = latestState.matrixValidCount;
     state.matrixBlobCount = latestState.matrixBlobCount;
-    uint8_t packet[bearamin_obs::kStatePacketSize] = {};
-    const size_t length = bearamin_obs::encodeState(
-        state, obsStateSequence++, packet, sizeof(packet));
-    if (length > 0 && sendObsPacket(packet, length)) {
-      ++obsStatePackets;
+    for (uint8_t axis = 0; axis < 5; ++axis) {
+      state.trajectoryStartNorm[axis] = latestState.trajectoryStartNorm[axis];
+    }
+    state.slewTauMs = latestState.trajectoryTauMs;
+    if ((v3Streams & bearamin_obs::STREAM_STATE) != 0) {
+      bearamin_obs::State v3State = state;
+      v3State.matrixXNorm = state.trajectoryStartNorm[0];
+      v3State.matrixYNorm = state.trajectoryStartNorm[1];
+      v3State.matrixZNorm = state.trajectoryStartNorm[2];
+      v3State.pitchNorm = state.trajectoryStartNorm[3];
+      v3State.rollNorm = state.trajectoryStartNorm[4];
+      v3State.matrixXMilli = static_cast<uint16_t>(
+          (static_cast<uint32_t>(v3State.matrixXNorm) * 1000u + 2047u) /
+          4095u);
+      v3State.matrixYMilli = static_cast<uint16_t>(
+          (static_cast<uint32_t>(v3State.matrixYNorm) * 1000u + 2047u) /
+          4095u);
+      uint8_t packet[bearamin_obs::kStatePacketSize] = {};
+      const size_t length = bearamin_obs::encodeState(
+          v3State, obsStateSequence++, packet, sizeof(packet));
+      if (length > 0 && sendObsPacket(packet, length)) {
+        ++obsStatePackets;
+      }
+    }
+    if ((v4Streams & bearamin_obs::STREAM_STATE) != 0 &&
+        latestState.trajectoryValid) {
+      uint8_t packet[bearamin_obs::kStatePacketSizeV4] = {};
+      const size_t length = bearamin_obs::encodeStateV4(
+          state, obsStateSequence++, packet, sizeof(packet));
+      if (length > 0 && sendObsPacket(packet, length)) {
+        ++obsStatePackets;
+      }
     }
   }
-  if (obsCellsPending &&
-      (streams & bearamin_obs::STREAM_CELLS) != 0) {
+  if (obsCellsPending) {
     obsCellsPending = false;
     bearamin_obs::Cells cells = {};
     cells.sourceUptimeMs = latestState.uptimeMs;
@@ -2554,11 +2636,23 @@ void sendPendingObsTelemetry(uint32_t now) {
     for (uint8_t i = 0; i < 64; ++i) {
       cells.cellsMm[i] = latestCells.cellsMm[i];
     }
-    uint8_t packet[bearamin_obs::kCellsPacketSize] = {};
-    const size_t length = bearamin_obs::encodeCells(
-        cells, obsCellSequence++, packet, sizeof(packet));
-    if (length > 0 && sendObsPacket(packet, length)) {
-      ++obsCellPackets;
+    if ((v3Streams & bearamin_obs::STREAM_CELLS) != 0) {
+      uint8_t packet[bearamin_obs::kCellsPacketSize] = {};
+      const size_t length = bearamin_obs::encodeCells(
+          cells, obsCellSequence++, packet, sizeof(packet));
+      if (length > 0 && sendObsPacket(packet, length)) {
+        ++obsCellPackets;
+      }
+    }
+    if ((v4Streams & bearamin_obs::STREAM_CELLS) != 0 &&
+        latestState.trajectoryValid) {
+      uint8_t packet[bearamin_obs::kCellsPacketSize] = {};
+      const size_t length = bearamin_obs::encodeCells(
+          cells, obsCellSequence++, packet, sizeof(packet),
+          bearamin_obs::kVersionV4);
+      if (length > 0 && sendObsPacket(packet, length)) {
+        ++obsCellPackets;
+      }
     }
   }
 }
@@ -2881,6 +2975,13 @@ void pollBootControlSync(uint32_t now) {
   requestRuntimeSettings();
 }
 
+bool findJsonObjectForKey(const String &json, const String &key, String &objectText);
+bool extractJsonValue(const String &json, const String &key, String &value);
+
+// Retired v9 relay protocol.  Presets must not transit Sidecar -> MatrixCore
+// -> DPT; keep this block only temporarily as source-history while RevD is
+// brought up, and do not compile it into the target.
+#if 0
 void queuePresetLine(const String &line) {
   const uint16_t next = (presetLineHead + 1) % kPresetLineQueueSize;
   if (next == presetLineTail) {
@@ -3416,6 +3517,346 @@ bool writePresetToSd(const String &name, const String &json, String &error) {
     }
   }
 }
+#endif
+
+void pollMatrixUart();
+
+bool defaultRequest(uint8_t op, const uint8_t *data, uint8_t length,
+                    bearamin_sidecar::PresetFrame &reply, String &error) {
+  bearamin_sidecar::PresetFrame request = {};
+  request.sequence = ++defaultRequestSequence;
+  request.op = op;
+  request.length = length;
+  if (length) memcpy(request.data, data, length);
+  uint8_t frame[bearamin_sidecar::kPresetFrameSize] = {};
+  const size_t bytes = bearamin_sidecar::encodePresetFrame(request, frame, sizeof(frame));
+  defaultReplyReady = false;
+  for (uint8_t attempt = 0; attempt < 3; ++attempt) {
+    MatrixSerial.write(frame, bytes);
+    const uint32_t start = millis();
+    while (millis() - start < 1000) {
+      pollMatrixUart();
+      if (defaultReplyReady && defaultReply.sequence == request.sequence &&
+          defaultReply.op == op && defaultReply.length > 0) {
+        reply = defaultReply;
+        defaultReplyReady = false;
+        if (reply.data[0] == bearamin_default::kOk) { error = ""; return true; }
+        error = reply.data[0] == bearamin_default::kMissing ? "missing" :
+                reply.data[0] == bearamin_default::kInvalid ? "invalid" : "storage";
+        return false;
+      }
+      delay(1);
+    }
+  }
+  error = "timeout";
+  return false;
+}
+
+bool readDefaultPreset(String &json, String &error) {
+  bearamin_sidecar::PresetFrame reply = {};
+  if (!defaultRequest(bearamin_default::kReadBegin, nullptr, 0, reply, error)) {
+    if (error == "missing" || error == "invalid") presetDefaultAvailable = false;
+    return false;
+  }
+  if (reply.length != 5) { error = "invalid"; return false; }
+  const size_t size = bearamin_sidecar::readLe16(reply.data, 1);
+  const uint16_t crc = bearamin_sidecar::readLe16(reply.data, 3);
+  if (size == 0 || size > bearamin_default::kMaxBytes) { error = "invalid"; return false; }
+  json = "";
+  if (!json.reserve(size)) { error = "memory"; return false; }
+  while (json.length() < size) {
+    uint8_t offset[2];
+    bearamin_sidecar::writeLe16(offset, 0, static_cast<uint16_t>(json.length()));
+    if (!defaultRequest(bearamin_default::kReadChunk, offset, sizeof(offset), reply, error)) return false;
+    if (reply.length <= 3 || bearamin_sidecar::readLe16(reply.data, 1) != json.length() ||
+        json.length() + reply.length - 3 > size) { error = "invalid"; return false; }
+    json.concat(reinterpret_cast<const char *>(reply.data + 3), reply.length - 3);
+  }
+  if (bearamin_sidecar::crc16Ccitt(reinterpret_cast<const uint8_t *>(json.c_str()), size) != crc) {
+    error = "invalid";
+    return false;
+  }
+  presetDefaultAvailable = true;
+  return true;
+}
+
+bool writeDefaultPreset(const String &json, String &error) {
+  if (json.length() == 0 || json.length() > bearamin_default::kMaxBytes) {
+    error = "large"; return false;
+  }
+  bearamin_sidecar::PresetFrame reply = {};
+  uint8_t data[bearamin_sidecar::kPresetLinePayloadSize] = {};
+  bearamin_sidecar::writeLe16(data, 0, static_cast<uint16_t>(json.length()));
+  bearamin_sidecar::writeLe16(data, 2, bearamin_sidecar::crc16Ccitt(
+      reinterpret_cast<const uint8_t *>(json.c_str()), json.length()));
+  if (!defaultRequest(bearamin_default::kWriteBegin, data, 4, reply, error)) return false;
+  for (size_t offset = 0; offset < json.length(); offset += bearamin_default::kWriteChunkBytes) {
+    const size_t count = std::min(json.length() - offset, bearamin_default::kWriteChunkBytes);
+    bearamin_sidecar::writeLe16(data, 0, static_cast<uint16_t>(offset));
+    memcpy(data + 2, json.c_str() + offset, count);
+    if (!defaultRequest(bearamin_default::kWriteChunk, data, count + 2, reply, error)) return false;
+  }
+  if (!defaultRequest(bearamin_default::kCommit, nullptr, 0, reply, error)) return false;
+  // Verify the committed record over the same path used at boot.
+  String check;
+  if (!readDefaultPreset(check, error) || check != json) {
+    if (error.length() == 0) error = "verify";
+    return false;
+  }
+  return true;
+}
+
+bool presetJsonV10(const String &json) {
+  String value;
+  String settings;
+  return json.length() > 0 && json.length() <= kPresetMaxJsonBytes &&
+         extractJsonValue(json, "format", value) &&
+         value == "bearamin-settings" &&
+         extractJsonValue(json, "version", value) && value.toInt() == 10 &&
+         findJsonObjectForKey(json, "settings", settings);
+}
+
+bool presetPathForName(const String &name, String &path) {
+  if (name == "default" || name.length() == 0 || name.length() >= kPresetMaxNameLength ||
+      sanitizePresetName(name) != name) {
+    return false;
+  }
+  path = String(kPresetDirectory) + "/" + name + ".json";
+  return true;
+}
+
+bool presetFileV10(const String &path) {
+  File file = SD.open(path, FILE_READ);
+  if (!file || file.isDirectory() || file.size() == 0 ||
+      file.size() > kPresetMaxJsonBytes) {
+    if (file) file.close();
+    return false;
+  }
+  String json;
+  json.reserve(file.size() + 1);
+  while (file.available()) json += static_cast<char>(file.read());
+  file.close();
+  return presetJsonV10(json);
+}
+
+void recoverPresetTransactions() {
+  File directory = SD.open(kPresetDirectory);
+  if (!directory || !directory.isDirectory()) { if (directory) directory.close(); return; }
+  for (File entry = directory.openNextFile(); entry; entry = directory.openNextFile()) {
+    String path = entry.path();
+    const bool regular = !entry.isDirectory();
+    entry.close();
+    if (!regular || path.endsWith("/default.json.tmp") ||
+        path.endsWith("/default.json.bak")) continue;
+    if (path.endsWith(".json.tmp")) {
+      const String target = path.substring(0, path.length() - 4);
+      const String backup = target + ".bak";
+      if (presetFileV10(target)) { SD.remove(path); SD.remove(backup); }
+      else if (presetFileV10(path)) { SD.remove(target); SD.rename(path, target); SD.remove(backup); }
+      else if (presetFileV10(backup)) { SD.remove(target); SD.remove(path); SD.rename(backup, target); }
+      else { SD.remove(path); SD.remove(backup); }
+    } else if (path.endsWith(".json.bak")) {
+      const String target = path.substring(0, path.length() - 4);
+      if (presetFileV10(target)) SD.remove(path);
+      else if (presetFileV10(path)) { SD.remove(target); SD.rename(path, target); }
+      else SD.remove(path);
+    }
+  }
+  directory.close();
+}
+
+bool initializePresetStorage();
+
+bool readPresetFromSd(const String &name, String &json, String &error,
+                      bool retried = false) {
+  String path;
+  if (!presetSdReady && !initializePresetStorage()) {
+    error = presetLastError.length() > 0 ? presetLastError : "sd";
+    return false;
+  }
+  if (!presetPathForName(name, path) || !SD.exists(path)) {
+    error = "missing";
+    return false;
+  }
+  File file = SD.open(path, FILE_READ);
+  if (!file || file.isDirectory() || file.size() == 0 ||
+      file.size() > kPresetMaxJsonBytes) {
+    if (file) file.close();
+    error = "invalid";
+    if (!retried) {
+      presetSdReady = false;
+      if (initializePresetStorage()) {
+        return readPresetFromSd(name, json, error, true);
+      }
+    }
+    return false;
+  }
+  json = "";
+  json.reserve(file.size() + 1);
+  while (file.available()) json += static_cast<char>(file.read());
+  file.close();
+  if (!presetJsonV10(json)) {
+    error = "preset_version";
+    return false;
+  }
+  error = "";
+  return true;
+}
+
+bool writePresetToSd(const String &name, const String &json, String &error,
+                     bool retried = false) {
+  String target;
+  if (!presetSdReady && !initializePresetStorage()) {
+    error = presetLastError.length() > 0 ? presetLastError : "sd";
+    return false;
+  }
+  if (!presetPathForName(name, target)) { error = "name"; return false; }
+  if (!presetJsonV10(json)) { error = "preset_version"; return false; }
+  const String temporary = target + ".tmp";
+  const String backup = target + ".bak";
+  SD.remove(temporary);
+  File file = SD.open(temporary, FILE_WRITE);
+  if (!file || file.print(json) != json.length()) {
+    if (file) file.close();
+    SD.remove(temporary);
+    error = "write";
+    if (!retried) {
+      presetSdReady = false;
+      if (initializePresetStorage()) {
+        return writePresetToSd(name, json, error, true);
+      }
+    }
+    return false;
+  }
+  file.close();
+  String verify;
+  // Verify the temporary file directly without letting a .tmp become a
+  // user-loadable preset name.
+  File check = SD.open(temporary, FILE_READ);
+  verify = "";
+  if (check && check.size() <= kPresetMaxJsonBytes) {
+    while (check.available()) verify += static_cast<char>(check.read());
+  }
+  if (check) check.close();
+  if (!presetJsonV10(verify)) {
+    SD.remove(temporary);
+    error = "verify";
+    if (!retried) {
+      presetSdReady = false;
+      if (initializePresetStorage()) {
+        return writePresetToSd(name, json, error, true);
+      }
+    }
+    return false;
+  }
+  SD.remove(backup);
+  if (SD.exists(target) && !SD.rename(target, backup)) {
+    SD.remove(temporary);
+    error = "backup";
+    if (!retried) {
+      presetSdReady = false;
+      if (initializePresetStorage()) {
+        return writePresetToSd(name, json, error, true);
+      }
+    }
+    return false;
+  }
+  if (!SD.rename(temporary, target)) {
+    if (SD.exists(backup)) SD.rename(backup, target);
+    error = "commit";
+    if (!retried) {
+      presetSdReady = false;
+      if (initializePresetStorage()) {
+        return writePresetToSd(name, json, error, true);
+      }
+    }
+    return false;
+  }
+  SD.remove(backup);
+  presetLastError = "";
+  return true;
+}
+
+bool initializePresetStorage() {
+  presetSdReady = false;
+  presetSdActiveSpiHz = 0;
+  for (uint8_t attempt = 0; attempt < kPresetSdMountMaxAttempts; ++attempt) {
+    const uint8_t divider = attempt < 3 ? attempt : 2;
+    uint32_t spiHz = kSdSpiHz >> divider;
+    if (spiHz < kPresetSdMinimumSpiHz) spiHz = kPresetSdMinimumSpiHz;
+    SD.end();
+    pinMode(kSdCsPin, OUTPUT);
+    digitalWrite(kSdCsPin, HIGH);
+    delay(kPresetSdMountRetryDelayMs);
+    SPI.begin(kSdSckPin, kSdMisoPin, kSdMosiPin, kSdCsPin);
+    if (!SD.begin(kSdCsPin, SPI, spiHz)) {
+      presetLastError = "sd";
+      continue;
+    }
+    presetSdReady = true;
+    presetSdActiveSpiHz = spiHz;
+    if (!SD.exists(kPresetDirectory) && !SD.mkdir(kPresetDirectory)) {
+      SD.end();
+      presetSdReady = false;
+      presetLastError = "directory";
+      continue;
+    }
+    recoverPresetTransactions();
+    presetLastError = "";
+    return true;
+  }
+  return false;
+}
+
+bool requestPresetList(String &presetsJson, String &error,
+                       String * = nullptr, size_t * = nullptr, size_t = 0) {
+  String names[kPresetMaxListedPresets];
+  size_t count = 0;
+  String json;
+  String defaultError;
+  if (readDefaultPreset(json, defaultError)) names[count++] = "default";
+  // SD availability never hides the stored boot preset.
+  if (presetSdReady || initializePresetStorage()) {
+    File directory = SD.open(kPresetDirectory);
+    if (directory && directory.isDirectory()) {
+      for (File entry = directory.openNextFile(); entry && count < kPresetMaxListedPresets;
+           entry = directory.openNextFile()) {
+        String filename = entry.name();
+        const bool regular = !entry.isDirectory();
+        entry.close();
+        const int slash = filename.lastIndexOf('/');
+        if (slash >= 0) filename.remove(0, slash + 1);
+        if (!regular || !filename.endsWith(".json")) continue;
+        filename.remove(filename.length() - 5);
+        if (filename == "default" || sanitizePresetName(filename) != filename) continue;
+        bool duplicate = false;
+        for (size_t i = 0; i < count; ++i) if (names[i] == filename) duplicate = true;
+        if (!duplicate) names[count++] = filename;
+      }
+    } else {
+      presetSdReady = false;
+      presetLastError = "directory";
+    }
+    directory.close();
+  }
+  if (defaultError.length() && defaultError != "missing" && count == 0) {
+    error = defaultError;
+    return false;
+  }
+  for (size_t i = 1; i < count; ++i) {
+    String value = names[i]; size_t p = i;
+    while (p > 0 && names[p - 1].compareTo(value) > 0) { names[p] = names[p - 1]; --p; }
+    names[p] = value;
+  }
+  presetsJson = "{\"ok\":true,\"sd_ready\":" + jsonBool(presetSdReady) + ",\"presets\":[";
+  for (size_t i = 0; i < count; ++i) {
+    if (i) presetsJson += ',';
+    presetsJson += "{\"name\":" + jsonString(names[i]) + ",\"filename\":" + jsonString(names[i] + ".json") + "}";
+  }
+  presetsJson += "],\"error\":\"\"}";
+  error = "";
+  return true;
+}
 
 bool findJsonObjectForKey(const String &json, const String &key, String &objectText) {
   const int keyIndex = json.indexOf("\"" + key + "\"");
@@ -3517,7 +3958,7 @@ bool applySettingsJson(const String &json, String &error) {
   String value;
   if (!extractJsonValue(trimmed, "format", value) ||
       value != "bearamin-settings" ||
-      !extractJsonValue(trimmed, "version", value) || value.toInt() != 9) {
+      !extractJsonValue(trimmed, "version", value) || value.toInt() != 10) {
     error = "preset_version";
     return false;
   }
@@ -3538,9 +3979,6 @@ bool applySettingsJson(const String &json, String &error) {
   }
   if (extractJsonValue(settings, "fm_map_z", value)) {
     fmDroneMapZ = parseFmParamArg(value, fmDroneMapZ);
-  }
-  if (extractJsonValue(settings, "announce_modes", value)) {
-    modeAnnouncementsEnabled = parseBoolArg(value);
   }
   for (uint8_t config = 0; config < kGestureConfigCount; ++config) {
     for (uint8_t lane = 0; lane < 6; ++lane) {
@@ -3841,6 +4279,46 @@ void handleCvMode() {
   handleDptSettings();
 }
 
+String serverPresetJson() {
+  String json = "{\"format\":\"bearamin-settings\",\"version\":10,\"firmware\":";
+  json += jsonString(BEARAMIN_FIRMWARE_VERSION);
+  json += ",\"saved_at_ms\":" + String(millis()) + ",\"settings\":{";
+  json += "\"fm_drone_ranger\":" + jsonBool(fmDroneRangerMode);
+  json += ",\"fm_map_x\":" + jsonString(fmParamName(fmDroneMapX));
+  json += ",\"fm_map_y\":" + jsonString(fmParamName(fmDroneMapY));
+  json += ",\"fm_map_z\":" + jsonString(fmParamName(fmDroneMapZ));
+  json += ",\"cv_slew_step\":" + String(cvSlewStep);
+  for (uint8_t mode = 0; mode < kGestureConfigCount; ++mode) {
+    for (uint8_t lane = 0; lane < 6; ++lane) {
+      char key[48];
+      snprintf(key, sizeof(key), "map_%s_%u_axis", gestureConfigKey(mode), lane);
+      json += ",\"" + String(key) + "\":" + jsonString(resonatorMapAxisName(gestureMapForModeLane(mode, lane)));
+      snprintf(key, sizeof(key), "map_%s_%u_depth", gestureConfigKey(mode), lane);
+      json += ",\"" + String(key) + "\":" + String(gestureDepthForModeLane(mode, lane));
+    }
+  }
+  json += ",\"res_feedback_amount\":" + String(resonatorWebControls[bearamin_bridge::RESONATOR_WEB_FEEDBACK_BASE]);
+  json += ",\"res_feedback_source\":" + jsonString(resonatorWebSourceName(resonatorWebControls[bearamin_bridge::RESONATOR_WEB_FEEDBACK_SOURCE]));
+  json += ",\"res_feedback_depth\":" + String(static_cast<int8_t>(resonatorWebControls[bearamin_bridge::RESONATOR_WEB_FEEDBACK_DEPTH]));
+  const uint8_t flags = resonatorWebControls[bearamin_bridge::RESONATOR_WEB_FLAGS];
+  json += ",\"res_drone_enabled\":" + jsonBool((flags & bearamin_bridge::RESONATOR_WEB_DRONE_ENABLED) != 0);
+  json += ",\"res_drone_waveform\":" + jsonString(resonatorDroneWaveformName(flags));
+  json += ",\"res_drone_level\":" + String(resonatorWebControls[bearamin_bridge::RESONATOR_WEB_DRONE_LEVEL]);
+  json += ",\"res_drone_source\":" + jsonString(resonatorWebSourceName(resonatorWebControls[bearamin_bridge::RESONATOR_WEB_DRONE_SOURCE]));
+  json += ",\"res_drone_depth\":" + String(static_cast<int8_t>(resonatorWebControls[bearamin_bridge::RESONATOR_WEB_DRONE_DEPTH]));
+  const char *names[] = {"time", "diffusion", "lp"};
+  const uint8_t offsets[][3] = {{bearamin_bridge::RESONATOR_WEB_REVERB_TIME, bearamin_bridge::RESONATOR_WEB_REVERB_TIME_SOURCE, bearamin_bridge::RESONATOR_WEB_REVERB_TIME_DEPTH}, {bearamin_bridge::RESONATOR_WEB_REVERB_DIFFUSION, bearamin_bridge::RESONATOR_WEB_REVERB_DIFFUSION_SOURCE, bearamin_bridge::RESONATOR_WEB_REVERB_DIFFUSION_DEPTH}, {bearamin_bridge::RESONATOR_WEB_REVERB_LP, bearamin_bridge::RESONATOR_WEB_REVERB_LP_SOURCE, bearamin_bridge::RESONATOR_WEB_REVERB_LP_DEPTH}};
+  for (uint8_t i = 0; i < 3; ++i) {
+    const String base = String("res_reverb_") + names[i];
+    json += ",\"" + base + "\":" + String(resonatorWebControls[offsets[i][0]]);
+    json += ",\"" + base + "_source\":" + jsonString(resonatorWebSourceName(resonatorWebControls[offsets[i][1]]));
+    json += ",\"" + base + "_depth\":" + String(static_cast<int8_t>(resonatorWebControls[offsets[i][2]]));
+  }
+  json += ",\"res_frequency_quantization\":" + jsonString(resonatorFrequencyQuantizationName(flags));
+  json += "}}\n";
+  return json;
+}
+
 void handleMatrixCoreOta() {
   sendCommand(bearamin_sidecar::COMMAND_ENTER_MATRIX_OTA, 1);
   sendJson("{\"ok\":true,\"matrixcore_ota_requested\":true}");
@@ -3876,17 +4354,15 @@ void handlePresetSave() {
     sendPresetErrorResponse("name", 400);
     return;
   }
-  const String json = server.arg("plain");
-  if (json.length() == 0 || json.length() > kPresetMaxJsonBytes) {
-    sendPresetErrorResponse(json.length() == 0 ? "empty" : "large", 400);
-    return;
-  }
+  // Storage is owned by the main unit: serialize authoritative local state,
+  // never a browser-supplied JSON document.
+  const String json = serverPresetJson();
   String error;
-  if (!writePresetToSd(name, json, error)) {
+  if (!(name == "default" ? writeDefaultPreset(json, error) : writePresetToSd(name, json, error))) {
     sendPresetErrorResponse(error);
     return;
   }
-  String body = "{\"ok\":true,\"sd_ready\":true,\"name\":";
+  String body = "{\"ok\":true,\"sd_ready\":" + jsonBool(presetSdReady) + ",\"name\":";
   body += jsonString(name);
   body += ",\"filename\":";
   body += jsonString(name + ".json");
@@ -3902,7 +4378,7 @@ void handlePresetLoad() {
   }
   String json;
   String error;
-  if (!readPresetFromSd(name, json, error)) {
+  if (!(name == "default" ? readDefaultPreset(json, error) : readPresetFromSd(name, json, error))) {
     sendPresetErrorResponse(error);
     return;
   }
@@ -3997,6 +4473,7 @@ void configureWeb() {
   server.on("/status.json", handleStatusJson);
   server.on("/wifi/diag.json", handleWifiDiagJson);
   server.on("/device.json", handleDeviceJson);
+  server.on("/lorenz", HTTP_GET, handleLorenz);
   server.on("/telemetry.json", handleTelemetryJson);
   server.on("/sensor/matrix.json", handleMatrixJson);
   server.on("/frames.json", handleFramesJson);
@@ -4105,7 +4582,12 @@ bool scanConfiguredWifi(WifiCandidate &preferred,
     return false;
   }
 
-  if (kWifiPrefer5Ghz && strongestFiveGhz.found) {
+  if (kWifiPrefer2Ghz && strongestTwoGhz.found) {
+    preferred = strongestTwoGhz;
+    if (strongestFiveGhz.found) {
+      fallback = strongestFiveGhz;
+    }
+  } else if (kWifiPrefer5Ghz && strongestFiveGhz.found) {
     preferred = strongestFiveGhz;
     if (strongestTwoGhz.found) {
       fallback = strongestTwoGhz;
@@ -4148,8 +4630,12 @@ bool connectConfiguredWifi(uint32_t timeoutMs) {
       }
       const uint32_t remainingMs = timeoutMs - (millis() - start);
       uint32_t attemptTimeoutMs = remainingMs;
-      if (fallback.found &&
-          bearamin_wifi::is5GhzChannel(candidate.channel)) {
+      const bool preferredBandCandidate =
+          (kWifiPrefer2Ghz &&
+           !bearamin_wifi::is5GhzChannel(candidate.channel)) ||
+          (!kWifiPrefer2Ghz && kWifiPrefer5Ghz &&
+           bearamin_wifi::is5GhzChannel(candidate.channel));
+      if (fallback.found && preferredBandCandidate) {
         attemptTimeoutMs = remainingMs / 2;
         if (attemptTimeoutMs > kWifiPreferredBandAttemptMs) {
           attemptTimeoutMs = kWifiPreferredBandAttemptMs;
@@ -4385,6 +4871,10 @@ void pollMatrixUart() {
     } else if (type == bearamin_sidecar::FRAME_ACK) {
       ++matrixAcks;
     } else if (type == bearamin_sidecar::FRAME_PRESET &&
+               bearamin_default::isOperation(preset.op)) {
+      defaultReply = preset;
+      defaultReplyReady = true;
+    } else if (type == bearamin_sidecar::FRAME_PRESET &&
                preset.op == bearamin_sidecar::PRESET_OP_LINE &&
                preset.length > 0) {
       String line;
@@ -4406,9 +4896,6 @@ void pollMatrixUart() {
             lastDptPerformanceMs = millis();
             ++dptPerformanceFrames;
           }
-        } else {
-          presetLastLine = line;
-          queuePresetLineWithEmbeddedResponses(line);
         }
       }
     }
@@ -4467,7 +4954,7 @@ void pollDefaultPresetBoot() {
   ++presetDefaultAttempts;
   String json;
   String error;
-  if (!readPresetFromSd("default", json, error)) {
+  if (!readDefaultPreset(json, error)) {
     presetDefaultLoaded = false;
     if (error == "missing" || presetDefaultAttempts >= kPresetDefaultMaxAttempts) {
       presetLastError = error == "missing" ? "" : error;
@@ -4492,19 +4979,23 @@ void pollDefaultPresetBoot() {
 
 void setup() {
   Serial.begin(kSerialBaud);
-  DebugSerial.begin(kDebugBaud, SERIAL_8N1, kDebugRxPin, kDebugTxPin);
-  debugSerialReady = true;
+  if (kDebugTxPin >= 0) {
+    DebugSerial.begin(kDebugBaud, SERIAL_8N1, kDebugRxPin, kDebugTxPin);
+    debugSerialReady = true;
+  }
   delay(80);
   sidecarBootResetReason = static_cast<uint32_t>(esp_reset_reason());
   sidecarMinFreeHeap = ESP.getFreeHeap();
   initializeCaptureStore();
+  initializePresetStorage();
   diagLogPrintln(BEARAMIN_BOOT_LABEL);
-  diagLogPrintf("sidecar_reset reason=%s(%lu) heap=%lu debug_uart=GPIO%u baud=%lu\n",
+  diagLogPrintf("sidecar_reset reason=%s(%lu) heap=%lu debug_uart=%s baud=%lu sd_spi=%s\n",
                 resetReasonName(sidecarBootResetReason),
                 static_cast<unsigned long>(sidecarBootResetReason),
                 static_cast<unsigned long>(sidecarMinFreeHeap),
-                kDebugTxPin,
-                static_cast<unsigned long>(kDebugBaud));
+                debugSerialReady ? "enabled" : "usb-only",
+                static_cast<unsigned long>(kDebugBaud),
+                presetSdReady ? "ready" : "unavailable");
   MatrixSerial.setRxBufferSize(kMatrixRxBufferBytes);
   MatrixSerial.begin(kMatrixBaud, SERIAL_8N1, kMatrixRxPin, kMatrixTxPin);
   registerWifiDiagnostics();

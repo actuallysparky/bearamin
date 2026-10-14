@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Bearamin OBS Mappings</title>
+<style>
+:root{color-scheme:dark;--cyan:#4df4d1;--gold:#f5dd6b;--pink:#ff5ca8;--ink:#e8fbff;--muted:#8da5ac}
+*{box-sizing:border-box}
+html,body{width:100%;height:100%;margin:0;overflow:hidden;background:transparent}
+body{display:flex;align-items:flex-end;padding:10px;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:var(--ink)}
+#strip{width:100%;height:150px;display:grid;grid-template-columns:minmax(235px,.95fr) repeat(6,minmax(145px,1fr));gap:8px;transition:opacity .25s ease}
+#strip.stale{opacity:.22}
+#lanes{display:contents}
+.panel{min-width:0;border:1px solid rgba(112,214,216,.34);border-radius:14px;background:linear-gradient(145deg,rgba(4,12,15,.92),rgba(11,20,24,.78));box-shadow:0 12px 40px rgba(0,0,0,.3),inset 0 0 30px rgba(77,244,209,.03);backdrop-filter:blur(9px)}
+#summary{display:flex;flex-direction:column;justify-content:space-between;padding:8px 12px}
+.eyebrow{font-size:14px;font-weight:850;letter-spacing:.14em;text-transform:uppercase;color:var(--cyan)}
+#mode{margin:2px 0 0;font-size:34px;line-height:.95;letter-spacing:-.035em}
+#value-mode{display:inline-flex;align-self:flex-start;margin-top:2px;padding:3px 7px;border:1px solid rgba(245,221,107,.35);border-radius:999px;color:var(--gold);font-size:11px;font-weight:800;letter-spacing:.08em;text-transform:uppercase}
+#amount{font:700 16px ui-monospace,SFMono-Regular,Consolas,monospace;color:var(--muted)}
+.lane{--lane:var(--cyan);display:grid;grid-template-rows:auto auto 1fr auto;gap:3px;padding:8px 11px;overflow:hidden}
+.lane.inactive{opacity:.46}
+.lane-head{display:flex;align-items:center;gap:8px;min-width:0}
+.lane-number{flex:0 0 auto;width:28px;height:28px;display:grid;place-items:center;border:1px solid color-mix(in srgb,var(--lane) 58%,transparent);border-radius:50%;color:var(--lane);font-size:13px;font-weight:900}
+.lane-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:22px;font-weight:800}
+.mapping{min-width:0;min-height:22px;display:flex;align-items:baseline;gap:5px;overflow:hidden;white-space:nowrap;color:var(--muted);font-size:14px;line-height:1.15}
+.mapping strong{flex:0 0 auto;color:var(--ink);font-size:17px}
+.mapping span{overflow:hidden;text-overflow:ellipsis}
+.meter{position:relative;align-self:center;height:18px;border:1px solid rgba(141,165,172,.28);border-radius:999px;background:rgba(141,165,172,.10);overflow:visible}
+.meter:after{content:"";position:absolute;z-index:2;top:-4px;bottom:-4px;left:50%;width:1px;background:rgba(232,251,255,.28)}
+.fill{position:absolute;top:2px;bottom:2px;left:50%;width:0;border-radius:999px;background:linear-gradient(90deg,var(--cyan),var(--gold),var(--pink));box-shadow:0 0 14px color-mix(in srgb,var(--lane) 60%,transparent);transition:left .11s linear,width .11s linear}
+.orb{position:absolute;z-index:3;top:50%;left:50%;width:11px;height:11px;border:2px solid rgba(232,251,255,.9);border-radius:50%;background:var(--lane);box-shadow:0 0 16px var(--lane);transform:translate(-50%,-50%);transition:left .11s linear,width .11s linear,height .11s linear}
+.readout{display:flex;align-items:end;justify-content:space-between;gap:6px}
+.current{font:850 40px/1 ui-monospace,SFMono-Regular,Consolas,monospace;color:var(--lane);letter-spacing:-.05em}
+.base{font:650 15px/1.2 ui-monospace,SFMono-Regular,Consolas,monospace;color:var(--muted);text-align:right}
+@media(max-width:1100px){body{padding:8px}#strip{height:calc(100% - 16px);grid-template-columns:repeat(3,1fr);grid-template-rows:auto 1fr 1fr;gap:7px}#summary{grid-column:1/-1;display:grid;grid-template-columns:1fr auto;align-items:center;padding:10px 14px}#mode{font-size:30px}.lane{padding:8px 10px}.lane-name{font-size:20px}.current{font-size:34px}}
+</style>
+</head>
+<body>
+<main id="strip" class="stale">
+  <section id="summary" class="panel">
+    <div><div class="eyebrow">Bearamin mappings</div><h1 id="mode">Waiting for DPT</h1><div id="value-mode">Bearamin contribution</div></div>
+    <div id="amount">CV7 amount —</div>
+  </section>
+  <div id="lanes"></div>
+</main>
+<script>
+const strip=document.getElementById('strip'),lanesRoot=document.getElementById('lanes'),colors=['#4df4d1','#76eaa6','#c8e983','#f5dd6b','#ff9c7d','#ff5ca8'];
+let signature='',latestFrame=null,lastPacketAt=0;
+const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const sourceLabel=source=>source==='none'?'None':source.replace('_bipolar',' bipolar').replace('_unipolar',' unipolar').replace(/^x/,'X').replace(/^y/,'Y').replace(/^z/,'Z').replace(/^pitch/,'Pitch').replace(/^roll/,'Roll').replace(/^spank/,'Spank');
+function rebuild(frame){
+  document.getElementById('mode').textContent=frame.mode_name;
+  document.getElementById('value-mode').textContent=frame.value_mode==='total'?'Final · knob + Bearamin':'Bearamin contribution';
+  lanesRoot.replaceChildren(...frame.lanes.map((lane,index)=>{const card=document.createElement('section');card.className='panel lane'+(lane.source==='none'?' inactive':'');card.style.setProperty('--lane',colors[index]);card.dataset.lane=String(index);card.innerHTML=`<div class="lane-head"><span class="lane-number">${index+1}</span><span class="lane-name">${esc(lane.name)}</span></div><div class="mapping"><strong>${esc(sourceLabel(lane.source))}</strong><span>atten ${lane.depth_percent>0?'+':''}${lane.depth_percent}%</span></div><div class="meter"><span class="fill"></span><span class="orb"></span></div><div class="readout"><span class="current">—</span><span class="base">knob<br>${Math.round(lane.base*100)}%</span></div>`;return card}));
+}
+function trajectoryAxes(frame){const start=frame.trajectory_start_norm||[],target=[frame.matrix_x_norm,frame.matrix_y_norm,frame.matrix_z_norm,frame.pitch_norm??2048,frame.roll_norm??2048],tau=+frame.slew_tau_ms;
+  if(frame.protocol_version!==4||start.length!==5||!Number.isFinite(tau)||tau<43||tau>420)return null;
+  const received=+frame.state_received_unix_ms||Date.now(),elapsed=Math.max(0,(+frame.sensor_age_ms||0)+Date.now()-received),decay=Math.exp(-elapsed/tau);
+  return target.map((value,index)=>Math.max(0,Math.min(1,(value+(start[index]-value)*decay)/4095)));
+}
+function nativeMappingValue(frame,axes,source){if(source==='spank')return frame.spank_gate?1:0;const unipolar=source.endsWith('_unipolar'),axis=source.replace(/_(unipolar|bipolar)$/,'');const index={x:0,y:1,z:2,pitch:3,roll:4}[axis];if(index===undefined||!axes)return 0;const unit=axes[index];return unipolar?unit:Math.max(-1,Math.min(1,unit*2-1));}
+function render(frame,axes){
+  const nextSignature=frame.mode_index+'|'+frame.value_mode+'|'+frame.lanes.map(lane=>lane.source+':'+lane.depth_percent).join('|');
+  if(nextSignature!==signature){signature=nextSignature;rebuild(frame)}
+  document.getElementById('amount').textContent=`CV7 amount ${Math.round(frame.gesture_amount*100)}%`;
+  frame.lanes.forEach((lane,index)=>{const card=document.querySelector(`[data-lane="${index}"]`);if(!card)return;let total=lane.total,mod=lane.modulation;if(axes){const raw=nativeMappingValue(frame,axes,lane.source)*lane.depth_percent*(+frame.mapping_depth_gain||.03)*frame.gesture_amount*(+frame.mode_gain||1);total=Math.max(0,Math.min(1,lane.base+raw));mod=total-lane.base}const value=frame.value_mode==='total'?total:mod,position=frame.value_mode==='total'?total:.5+mod*.5,left=frame.value_mode==='total'?0:Math.min(.5,.5+mod*.5),width=frame.value_mode==='total'?total:Math.abs(mod)*.5,fill=card.querySelector('.fill'),orb=card.querySelector('.orb');fill.style.left=(left*100)+'%';fill.style.width=(width*100)+'%';orb.style.left=(position*100)+'%';const orbSize=11+Math.abs(frame.value_mode==='total'?total:mod)*17;orb.style.width=orbSize+'px';orb.style.height=orbSize+'px';card.querySelector('.current').textContent=frame.value_mode==='total'?Math.round(value*100)+'%':(value>=0?'+':'')+Math.round(value*100)+'%';card.querySelector('.base').innerHTML=`knob<br>${Math.round(lane.base*100)}%`});
+  strip.classList.toggle('stale',!frame.dpt_ready||frame.core_link_stale);
+}
+const events=new EventSource('/events?mode=mappings');
+events.addEventListener('mappings',event=>{latestFrame=JSON.parse(event.data);lastPacketAt=performance.now()});
+function frame(){if(latestFrame)render(latestFrame,trajectoryAxes(latestFrame));requestAnimationFrame(frame)}
+requestAnimationFrame(frame);
+setInterval(()=>{if(performance.now()-lastPacketAt>1500)strip.classList.add('stale')},250);
+</script>
+</body>
+</html>

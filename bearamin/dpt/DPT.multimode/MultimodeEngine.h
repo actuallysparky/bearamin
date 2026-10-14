@@ -188,6 +188,72 @@ struct DptPerformanceSnapshot
     uint32_t max_tx_call_us;
 };
 
+struct BearaminTrajectoryDiagnostics
+{
+    uint8_t  protocol_version;
+    uint16_t slew_tau_ms;
+    uint32_t source_epoch_ms;
+    uint16_t source_age_ms;
+    uint32_t v10_packet_count;
+    uint32_t v11_packet_count;
+    uint32_t correction_count;
+    uint32_t max_correction_norm;
+    uint32_t invalid_keyframe_count;
+    uint32_t stale_transitions;
+    uint32_t deadline_misses;
+};
+
+inline size_t EncodeBearaminTrajectoryDiagnosticsLine(
+    const BearaminTrajectoryDiagnostics& diagnostics,
+    char*                                out,
+    size_t                               capacity)
+{
+    // DPTD,1,PP,TTTT,EEEEEEEE,AAAA,CCCCCCCC,CCCCCCCC,CCCCCCCC,
+    //        CCCCCCCC,CCCCCCCC,CCCCCCCC,CCCCCCCC\n
+    static constexpr size_t kFieldCount = 7;
+    static constexpr size_t kLineLength = 7 + 2 + 1 + 4 + 1 + 8 + 1 + 4
+                                          + kFieldCount * 9 + 1;
+    if(out == nullptr || capacity <= kLineLength)
+        return 0;
+    size_t index = 0;
+    out[index++] = 'D';
+    out[index++] = 'P';
+    out[index++] = 'T';
+    out[index++] = 'D';
+    out[index++] = ',';
+    out[index++] = '1';
+    out[index++] = ',';
+    WriteHexByte(out + index, diagnostics.protocol_version);
+    index += 2;
+    out[index++] = ',';
+    WriteHexU16(out + index, diagnostics.slew_tau_ms);
+    index += 4;
+    out[index++] = ',';
+    WriteHexU32(out + index, diagnostics.source_epoch_ms);
+    index += 8;
+    out[index++] = ',';
+    WriteHexU16(out + index, diagnostics.source_age_ms);
+    index += 4;
+    const uint32_t fields[kFieldCount] = {
+        diagnostics.v10_packet_count,
+        diagnostics.v11_packet_count,
+        diagnostics.correction_count,
+        diagnostics.max_correction_norm,
+        diagnostics.invalid_keyframe_count,
+        diagnostics.stale_transitions,
+        diagnostics.deadline_misses,
+    };
+    for(size_t field = 0; field < kFieldCount; ++field)
+    {
+        out[index++] = ',';
+        WriteHexU32(out + index, fields[field]);
+        index += 8;
+    }
+    out[index++] = '\n';
+    out[index] = '\0';
+    return index;
+}
+
 inline size_t EncodeDptPerformanceLine(const DptPerformanceSnapshot& snapshot,
                                        char*                         out,
                                        size_t                        capacity)
@@ -395,13 +461,22 @@ class PhaseOscillator
 
 static constexpr uint8_t  kBearaminStart0      = 0xA5;
 static constexpr uint8_t  kBearaminStart1      = 0x5A;
-static constexpr uint8_t  kBearaminVersion     = 10;
-static constexpr uint8_t  kBearaminPayloadSize = 64;
-static constexpr size_t   kBearaminFrameSize   = 2 + 1 + 1 + kBearaminPayloadSize + 2;
-static constexpr size_t   kBearaminMaxFrameSize = kBearaminFrameSize;
+static constexpr uint8_t  kBearaminVersionV10 = 10;
+static constexpr uint8_t  kBearaminVersionV11 = 11;
+static constexpr uint8_t  kBearaminVersion     = kBearaminVersionV10;
+static constexpr uint8_t  kBearaminPayloadSizeV10 = 64;
+static constexpr uint8_t  kBearaminPayloadSizeV11 = 76;
+static constexpr uint8_t  kBearaminPayloadSize = kBearaminPayloadSizeV10;
+static constexpr size_t   kBearaminFrameSizeV10 = 2 + 1 + 1 + kBearaminPayloadSizeV10 + 2;
+static constexpr size_t   kBearaminFrameSizeV11 = 2 + 1 + 1 + kBearaminPayloadSizeV11 + 2;
+static constexpr size_t   kBearaminFrameSize   = kBearaminFrameSizeV10;
+static constexpr size_t   kBearaminMaxFrameSize = kBearaminFrameSizeV11;
+static_assert(kBearaminFrameSizeV10 == 70, "Bridge v10 size drift");
+static_assert(kBearaminFrameSizeV11 == 82, "Bridge v11 size drift");
 static constexpr uint8_t  kBearaminDptProbe[]  = {'D', 'P', 'T', '\n'};
 static constexpr size_t   kBearaminDptProbeSize = sizeof(kBearaminDptProbe);
 static constexpr uint16_t kBearaminOldValid    = 1u << 0;
+static constexpr uint16_t kBearaminChaosActive = 1u << 0;
 static constexpr uint16_t kBearaminMatrixValid = 1u << 1;
 static constexpr uint16_t kBearaminImpactGate   = 1u << 2;
 static constexpr uint16_t kBearaminModeAnnouncementsEnabled = 1u << 8;
@@ -725,6 +800,7 @@ inline uint32_t PackBearaminResonatorMappings(
 
 struct BearaminBridgePacket
 {
+    uint8_t  protocol_version = kBearaminVersionV10;
     uint16_t sequence;
     uint16_t flags;
     uint16_t old_z_mm;
@@ -752,6 +828,12 @@ struct BearaminBridgePacket
     uint16_t pitch_norm;
     uint16_t roll_norm;
     uint8_t  orientation_confidence;
+    uint32_t source_epoch_ms = 0;
+    uint16_t trajectory_start_norm[5] = {};
+    uint16_t slew_tau_ms = 43;
+    float    trajectory_receipt_norm[5] = {};
+    float    trajectory_decay_per_callback = 1.0f;
+    bool     trajectory_prepared = false;
 };
 
 inline bool BearaminImpactGateActive(const BearaminBridgePacket& packet)
@@ -796,6 +878,18 @@ inline void WriteLe16(uint8_t* buffer, size_t offset, uint16_t value)
 {
     buffer[offset]     = static_cast<uint8_t>(value & 0xFF);
     buffer[offset + 1] = static_cast<uint8_t>((value >> 8) & 0xFF);
+}
+
+inline void WriteLe32(uint8_t* buffer, size_t offset, uint32_t value)
+{
+    WriteLe16(buffer, offset, static_cast<uint16_t>(value & 0xFFFFu));
+    WriteLe16(buffer, offset + 2, static_cast<uint16_t>(value >> 16));
+}
+
+inline uint32_t ReadLe32(const uint8_t* buffer, size_t offset)
+{
+    return static_cast<uint32_t>(ReadLe16(buffer, offset))
+           | (static_cast<uint32_t>(ReadLe16(buffer, offset + 2)) << 16);
 }
 
 inline uint16_t Crc16Ccitt(const uint8_t* data, size_t size)
@@ -879,7 +973,27 @@ inline BearaminBridgePacket DecodeBearaminPayload(const uint8_t* payload)
     packet.pitch_norm = ReadLe16(payload, 59);
     packet.roll_norm = ReadLe16(payload, 61);
     packet.orientation_confidence = payload[63];
+    packet.protocol_version = kBearaminVersionV10;
     return packet;
+}
+
+inline bool ValidBearaminTrajectoryPacket(const BearaminBridgePacket& packet)
+{
+    if(packet.slew_tau_ms < 43 || packet.slew_tau_ms > 420)
+        return false;
+    const uint16_t targets[5] = {
+        packet.matrix_x_norm,
+        packet.matrix_y_norm,
+        packet.matrix_z_norm,
+        packet.pitch_norm,
+        packet.roll_norm,
+    };
+    for(uint8_t axis = 0; axis < 5; ++axis)
+    {
+        if(packet.trajectory_start_norm[axis] > 4095 || targets[axis] > 4095)
+            return false;
+    }
+    return true;
 }
 
 inline size_t EncodeBearaminFrame(const BearaminBridgePacket& packet,
@@ -899,18 +1013,49 @@ inline size_t EncodeBearaminFrame(const BearaminBridgePacket& packet,
     return kBearaminFrameSize;
 }
 
+inline size_t EncodeBearaminFrameV11(const BearaminBridgePacket& packet,
+                                     uint8_t*                    frame,
+                                     size_t                      capacity)
+{
+    if(capacity < kBearaminFrameSizeV11 || !ValidBearaminTrajectoryPacket(packet))
+        return 0;
+    frame[0] = kBearaminStart0;
+    frame[1] = kBearaminStart1;
+    frame[2] = kBearaminVersionV11;
+    frame[3] = kBearaminPayloadSizeV11;
+    EncodeBearaminPayload(packet, frame + 4);
+    WriteLe32(frame + 4, 4, packet.source_epoch_ms);
+    for(uint8_t axis = 0; axis < 5; ++axis)
+        WriteLe16(frame + 4, 64 + axis * 2u, packet.trajectory_start_norm[axis]);
+    WriteLe16(frame + 4, 74, packet.slew_tau_ms);
+    const uint16_t crc = Crc16Ccitt(frame, 4 + kBearaminPayloadSizeV11);
+    WriteLe16(frame, 4 + kBearaminPayloadSizeV11, crc);
+    return kBearaminFrameSizeV11;
+}
+
 inline bool DecodeBearaminFrame(const uint8_t*         frame,
                                 size_t                 size,
                                 BearaminBridgePacket& packet)
 {
-    if(size != kBearaminFrameSize || frame[0] != kBearaminStart0
+    if(frame == nullptr || size < 6 || frame[0] != kBearaminStart0
        || frame[1] != kBearaminStart1)
     {
         return false;
     }
     const uint8_t version      = frame[2];
     const uint8_t payload_size = frame[3];
-    if(version != kBearaminVersion || payload_size != kBearaminPayloadSize)
+    const size_t expected_size = version == kBearaminVersionV10
+                                 ? kBearaminFrameSizeV10
+                                 : version == kBearaminVersionV11
+                                       ? kBearaminFrameSizeV11
+                                       : 0;
+    const uint8_t expected_payload = version == kBearaminVersionV10
+                                     ? kBearaminPayloadSizeV10
+                                     : version == kBearaminVersionV11
+                                           ? kBearaminPayloadSizeV11
+                                           : 0;
+    if(expected_size == 0 || size != expected_size
+       || payload_size != expected_payload)
         return false;
 
     const uint16_t expected = ReadLe16(frame, 4 + payload_size);
@@ -919,6 +1064,17 @@ inline bool DecodeBearaminFrame(const uint8_t*         frame,
         return false;
 
     packet = DecodeBearaminPayload(frame + 4);
+    if(version == kBearaminVersionV11)
+    {
+        packet.protocol_version = kBearaminVersionV11;
+        packet.source_epoch_ms = ReadLe32(frame + 4, 4);
+        for(uint8_t axis = 0; axis < 5; ++axis)
+            packet.trajectory_start_norm[axis]
+                = ReadLe16(frame + 4, 64 + axis * 2u);
+        packet.slew_tau_ms = ReadLe16(frame + 4, 74);
+        if(!ValidBearaminTrajectoryPacket(packet))
+            return false;
+    }
     return true;
 }
 
@@ -942,9 +1098,12 @@ class BearaminBridgeParser
         {
             const uint8_t version      = buffer_[2];
             const uint8_t payload_size = buffer_[3];
-            if(version == kBearaminVersion
-               && payload_size == kBearaminPayloadSize)
-                expected_size_ = kBearaminFrameSize;
+            if(version == kBearaminVersionV10
+               && payload_size == kBearaminPayloadSizeV10)
+                expected_size_ = kBearaminFrameSizeV10;
+            else if(version == kBearaminVersionV11
+                    && payload_size == kBearaminPayloadSizeV11)
+                expected_size_ = kBearaminFrameSizeV11;
             else
             {
                 Reset();
@@ -1414,8 +1573,10 @@ class BearaminCvRouter
 
         const bool stale = (packet.flags & kBearaminStale) != 0;
         const bool matrix_valid = (packet.flags & kBearaminMatrixValid) != 0;
+        const bool chaos_active = (packet.flags & kBearaminChaosActive) != 0;
         const bool playable_blob
-            = fresh && !stale && matrix_valid && packet.matrix_blob_count > 0;
+            = fresh && !stale
+              && (chaos_active || (matrix_valid && packet.matrix_blob_count > 0));
         const bool presence_hold
             = fresh && !stale && matrix_valid && packet.matrix_blob_count == 0;
 

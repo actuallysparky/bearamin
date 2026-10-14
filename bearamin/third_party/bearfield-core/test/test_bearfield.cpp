@@ -119,6 +119,10 @@ int main(int argc, char **argv) {
   auto first = processor.process(blob(1, 66667, 0, 0, 400), 66667);
   assert(first.present);
   assert(first.sourceSequence == 1);
+  assert(first.blobCount == 4);
+  assert(first.blobMask ==
+         ((1ULL << cellIndex(0, 0)) | (1ULL << cellIndex(1, 0)) |
+          (1ULL << cellIndex(0, 1)) | (1ULL << cellIndex(1, 1))));
   assert(first.xNorm12 < kNormCenter);
   assert(first.yNorm12 < kNormCenter);
 
@@ -153,6 +157,7 @@ int main(int argc, char **argv) {
   noPresence.capturedUs = 200000;
   const auto held = idleReturn.process(noPresence, 200000);
   assert(held.present);
+  assert(held.blobMask == 0);
   assert(held.xMilli == acquiredRight.xMilli);
   assert(held.yMilli == acquiredRight.yMilli);
   noPresence.sequence = 3;
@@ -177,6 +182,22 @@ int main(int argc, char **argv) {
   assert(centered.yNorm12 == kNormCenter);
   assert(centered.xMilli == 500);
   assert(centered.yMilli == 500);
+
+  // MatrixCore's visual endpoint is centered in X/Y but zero in unipolar
+  // depth. Zero X/Y normalized coordinates are a physical display corner.
+  FeelProfile matrixIdleProfile = BearaminV2();
+  matrixIdleProfile.idleDepthNorm = 0;
+  matrixIdleProfile.axisTauSeconds = 0.1f;
+  Processor matrixIdle(matrixIdleProfile);
+  matrixIdle.process(blob(1, 100000, 6, 6, 350), 100000);
+  DepthFrame8x8 matrixEmpty = {};
+  matrixEmpty.sequence = 2;
+  matrixEmpty.capturedUs = 400000;
+  matrixIdle.process(matrixEmpty, 400000);
+  assert(!matrixIdle.target().present);
+  assert(matrixIdle.target().xNorm12 == kNormCenter);
+  assert(matrixIdle.target().yNorm12 == kNormCenter);
+  assert(matrixIdle.target().zNorm12 == 0);
 
   Processor gesture(BearaminV2());
   gesture.process(blob(1, 100000, 3, 3, 500), 100000);

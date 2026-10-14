@@ -1,5 +1,7 @@
 #if defined(BEARAMIN_TARGET_MATRIX_VL53L8CX)
 #include "targets/vl53l8cx_s3.h"
+#elif defined(BEARAMIN_TARGET_MATRIX_VL53L7CX_REVC)
+#include "targets/vl53l7cx_revc_s3.h"
 #else
 #include "targets/vl53l7cx_s3.h"
 #endif
@@ -20,8 +22,11 @@
 #include <cmath>
 #include <cstdio>
 #include <esp_timer.h>
+#include <nvs.h>
+#include "../../../common/default_preset_store.h"
 
 #include "../../../../third_party/bearfield-core/include/bearfield/bearfield.h"
+#include "../../../common/chaos_lorenz.h"
 
 #include "../../../common/capture_protocol.h"
 #include "../../../common/direction_logic.h"
@@ -31,6 +36,7 @@
 #include "../../../common/preset_quiet.h"
 #include "../../../common/sensor_recovery.h"
 #include "../../../common/sidecar_protocol.h"
+#include "../../../common/trajectory_keyframe.h"
 #include "../../../common/wifi_band_logic.h"
 #include "esp32-hal-rmt.h"
 
@@ -100,6 +106,10 @@ uint16_t capAgeMs(uint32_t timestampMs);
 #define BEARAMIN_TRUE_GRID_TO_DISPLAY_MIRROR_Y 0
 #endif
 
+#ifndef BEARAMIN_STATUS_USES_DISPLAY_PROFILE
+#define BEARAMIN_STATUS_USES_DISPLAY_PROFILE 0
+#endif
+
 #ifndef BEARAMIN_OPTICAL_CLOCK_HZ
 #define BEARAMIN_OPTICAL_CLOCK_HZ 400000
 #endif
@@ -119,6 +129,7 @@ using espmatrix::depthBrightnessForDistance;
 using espmatrix::logicalColumnForPhysicalVerticalFlip;
 using espmatrix::midpointMarkerBlendMilli;
 using espmatrix::nearestLedCoordinateForMilli;
+using espmatrix::liquidRainbowColor;
 using espmatrix::rotatedClockwisePixelIndex;
 using espmatrix::rotatedClockwisePixelIndex180;
 using espmatrix::scaleChannel;
@@ -133,7 +144,10 @@ constexpr uint8_t kImuSdaPin = 11;
 constexpr uint8_t kImuSclPin = 12;
 constexpr uint8_t kOpticalSdaPin = 1;
 constexpr uint8_t kOpticalSclPin = 2;
-constexpr uint8_t kMatrixLprPin = 5;
+#ifndef BEARAMIN_MATRIX_LPR_PIN
+#define BEARAMIN_MATRIX_LPR_PIN 5
+#endif
+constexpr uint8_t kMatrixLprPin = BEARAMIN_MATRIX_LPR_PIN;
 constexpr uint8_t kMatrixAuxPin = 4;
 constexpr uint8_t kDptTxPin = 33;
 constexpr uint8_t kDptRxPin = 34;
@@ -155,11 +169,11 @@ constexpr const char *kMatrixSensorName = "VL53L7CX";
 #endif
 constexpr uint8_t kMatrixSourceHz = 15;
 constexpr uint8_t kProcessedOutputHz = 30;
-constexpr uint32_t kDptSendMs = 50;
+constexpr uint32_t kDptSendMs = 1000 / kMatrixSourceHz;
 constexpr uint32_t kDptProbeMs = 250;
 constexpr uint32_t kDptRxTxGuardMs = 2;
 constexpr bool kDptContinuousTxEnabled = true;
-constexpr uint32_t kSidecarStateMs = 50;
+constexpr uint32_t kSidecarStateMs = 1000 / kMatrixSourceHz;
 constexpr uint32_t kSidecarCellsMs = 100;
 constexpr uint32_t kSidecarSensorDiagnosticsMs = 1000;
 constexpr size_t kCaptureRingBytes = 16 * 1024;
@@ -188,15 +202,11 @@ constexpr uint16_t kMatrixDepthOffsetMm = 45;
 constexpr uint16_t kMatrixMaxMusicMm = kFadeMaxMm - kMatrixDepthOffsetMm;
 constexpr uint16_t kMatrixBlobWindowMm = 250;
 constexpr uint8_t kMatrixMinBlobCells = 4;
-constexpr uint16_t kMatrixPresenceHoldMs = 250;
-constexpr uint16_t kMatrixCentroidDeadbandMilli = 10;
-constexpr uint8_t kMatrixCentroidNewWeight = 3;
-constexpr uint8_t kMatrixCentroidWeightTotal = 4;
 constexpr uint8_t kMatrixStatusRangingOk = 5;
 constexpr uint8_t kMatrixStatusRangingOkLargePulse = 9;
-constexpr uint8_t kMatrixIdleCenterShift = 4;
 constexpr uint16_t kMaxBridgeValue = 4095;
-constexpr uint16_t kCvSlewMaxStep = 196;
+constexpr uint16_t kCvSlewMaxStep = 32;
+constexpr uint32_t kTrajectoryStaleMs = 250;
 constexpr uint8_t kLedCount = 64;
 constexpr uint8_t kMatrixWidth = 8;
 constexpr uint8_t kBrightnessPercent = 12;
@@ -267,7 +277,6 @@ struct OpticalState {
   uint16_t cellsMm[64] = {};
   uint8_t statuses[64] = {};
   uint32_t lastMatrixReadMs = 0;
-  uint32_t lastMatrixPresenceMs = 0;
   uint32_t matrixMonitoringStartedMs = 0;
   uint32_t lastRecoveryMs = 0;
   uint16_t i2cRecoveries = 0;
@@ -304,12 +313,25 @@ bool matrixIdentityRoutesConfigured = false;
 bool matrixIdentityServerReady = false;
 bearamin_bridge::DptProbeParser dptProbeParser;
 bearamin_bridge::DptStatus dptStatus = {};
+bearamin_bridge::DptTrajectoryDiagnostics dptTrajectoryDiagnostics = {};
 bearamin_sidecar::Parser sidecarParser;
 ImpactDetector impactDetector;
+bearamin_chaos::StartupUnlock chaosUnlock;
+bearamin_chaos::Lorenz chaosLorenz;
+bearamin_chaos::Axes chaosAxes = {};
+float chaosTofInfluence = 0.0f;
+uint64_t chaosLastUs = 0;
+uint32_t chaosRainbowUntilMs = 0;
+bool previousImpactGate = false;
 bearamin_orientation::OrientationTracker orientationTracker;
 bearamin_orientation::SpankDetector spankDetector;
 bearfield::FeelProfile matrixFeelProfile() {
   bearfield::FeelProfile profile = bearfield::BearaminV2();
+  // The LED renderer maps unipolar X/Y 0 to its lower-right corner. A real
+  // no-presence frame therefore returns X/Y to its visual midpoint, while
+  // unipolar depth returns to zero.
+  profile.idleAxisNorm = bearfield::kNormCenter;
+  profile.idleDepthNorm = 0;
   profile.maximumSourceDepthMm = kMatrixMaxMusicMm;
   profile.depthOffsetMm = kMatrixDepthOffsetMm;
   profile.centroidMinimumX = BEARAMIN_TRUE_GRID_CENTROID_MIN_X;
@@ -320,6 +342,9 @@ bearfield::FeelProfile matrixFeelProfile() {
 }
 bearfield::Processor fieldProcessor(matrixFeelProfile());
 bearfield::ProcessedFieldState processedField = {};
+bearamin_trajectory::Authority trajectoryAuthority;
+bearamin_trajectory::EvaluatedAxes trajectoryOutputAxes = {};
+bool trajectoryOutputValid = false;
 OpticalState optical;
 OpticalState opticalRecoveryWorking;
 volatile OpticalRecoveryPhase opticalRecoveryPhase = OpticalRecoveryPhase::Idle;
@@ -343,7 +368,7 @@ uint16_t sidecarFrameErrors = 0;
 uint16_t cvBridgeX = cvBridgeCenterValue(kMaxBridgeValue);
 uint16_t cvBridgeY = cvBridgeCenterValue(kMaxBridgeValue);
 uint16_t cvBridgeZ = cvBridgeCenterValue(kMaxBridgeValue);
-uint16_t cvSlewStep = kCvSlewMaxStep;
+uint16_t cvSlewStep = 16;
 uint16_t dptControlFlags = 0;
 uint16_t dptReserved0 = 0;
 uint8_t dptReserved1 = 0;
@@ -357,6 +382,7 @@ bool modeAnnouncementsEnabled = false;
 bool sidecarControlsInitialized = false;
 uint16_t sidecarStatusFlags = 0;
 uint32_t lastDptSendMs = 0;
+uint32_t lastDptSourceSequenceSent = 0;
 uint32_t lastDptProbeMs = 0;
 uint32_t lastDptRxMs = 0;
 uint32_t lastDptWireRxByteMs = 0;
@@ -410,6 +436,7 @@ uint32_t dptFrameTxCount = 0;
 uint32_t dptPresetTxCount = 0;
 uint32_t dptRxByteCount = 0;
 uint32_t dptStatusLineCount = 0;
+uint32_t dptTrajectoryDiagnosticsLineCount = 0;
 uint32_t dptPresetLineCount = 0;
 uint32_t lastDptRxDiagMs = 0;
 uint32_t lastDptConsoleLogMs = 0;
@@ -1073,6 +1100,28 @@ void clearLeds() {
   }
 }
 
+void startChaosActivationFeedback(uint32_t now) {
+  constexpr uint32_t kChaosRainbowDurationMs = 1000;
+  chaosRainbowUntilMs = now + kChaosRainbowDurationMs;
+}
+
+bool renderChaosActivationFeedback(uint32_t now) {
+  if (static_cast<int32_t>(chaosRainbowUntilMs - now) <= 0) {
+    return false;
+  }
+  clearLeds();
+  const float phase = static_cast<float>(now) / 200.0f;
+  const uint8_t rank = static_cast<uint8_t>((now / 53u) & 0x0fu);
+  for (uint8_t row = 0; row < kMatrixWidth; ++row) {
+    for (uint8_t column = 0; column < kMatrixWidth; ++column) {
+      const LiquidColor color = liquidRainbowColor(column, row, rank, phase);
+      ledFrame[pixelIndex(column, row)] = {color.red, color.green, color.blue};
+    }
+  }
+  writeLeds();
+  return true;
+}
+
 void addPixel(uint8_t column, uint8_t row, Color color) {
   if (column >= kMatrixWidth || row >= kMatrixWidth) {
     return;
@@ -1087,11 +1136,18 @@ void setTopStatusPixel(uint8_t columnFromLeft, Color color) {
   if (columnFromLeft >= kMatrixWidth) {
     return;
   }
-  // Status indicators are board hardware UI, not true-grid data. Keep their
-  // installed physical top-row placement independent of the occupancy/vector
-  // consumer profile so a sensor-display calibration cannot move them.
+#if BEARAMIN_STATUS_USES_DISPLAY_PROFILE
+  // Matrix Core v3's complete panel, including its board-status row, follows
+  // the local display profile. This is display-only and leaves true-grid data
+  // plus all downstream telemetry unchanged.
+  Color &pixel = ledFrame[pixelIndex(columnFromLeft, kMatrixWidth - 1)];
+#else
+  // Matrix Core v2 status indicators are board hardware UI, not true-grid
+  // data. Keep their installed physical top-row placement independent of the
+  // occupancy/vector consumer profile.
   Color &pixel = ledFrame[(kMatrixWidth - 1) * kMatrixWidth +
                           (kMatrixWidth - 1 - columnFromLeft)];
+#endif
   pixel = color;
 }
 
@@ -1650,6 +1706,12 @@ void pollImu(uint32_t now) {
     return;
   }
   latestImpact = impactDetector.process(latestImu.accel, now);
+  if (latestImpact.gate && !previousImpactGate && chaosUnlock.event(now)) {
+    chaosLorenz.seed(static_cast<uint32_t>(esp_timer_get_time()) ^ latestImpact.velocityNorm);
+    startChaosActivationFeedback(now);
+    serialLogPrintln("chaos=enabled");
+  }
+  previousImpactGate = latestImpact.gate;
   captureImuSample(latestImu, captureCoreUs());
 }
 
@@ -1663,41 +1725,6 @@ bool matrixMusicValueValid(uint16_t valueMm) {
 
 bool matrixStatusValid(uint8_t status) {
   return status == kMatrixStatusRangingOk || status == kMatrixStatusRangingOkLargePulse;
-}
-
-uint16_t driftMilliTowardCenter(uint16_t value) {
-  if (value > 1000) {
-    value = 1000;
-  }
-  const int32_t delta = 500 - static_cast<int32_t>(value);
-  if (delta == 0) {
-    return 500;
-  }
-  int32_t step = delta / (1 << kMatrixIdleCenterShift);
-  if (step == 0) {
-    step = delta > 0 ? 1 : -1;
-  }
-  return static_cast<uint16_t>(
-      std::max<int32_t>(0, std::min<int32_t>(1000, static_cast<int32_t>(value) + step)));
-}
-
-uint16_t dampCentroidMilli(uint16_t current, uint16_t target) {
-  if (current > 1000) {
-    current = 1000;
-  }
-  if (target > 1000) {
-    target = 1000;
-  }
-  const int32_t delta = static_cast<int32_t>(target) - static_cast<int32_t>(current);
-  if (std::abs(delta) <= kMatrixCentroidDeadbandMilli) {
-    return current;
-  }
-  const uint8_t oldWeight = kMatrixCentroidWeightTotal - kMatrixCentroidNewWeight;
-  const uint32_t mixed =
-      static_cast<uint32_t>(current) * oldWeight +
-      static_cast<uint32_t>(target) * kMatrixCentroidNewWeight +
-      (kMatrixCentroidWeightTotal / 2);
-  return static_cast<uint16_t>(mixed / kMatrixCentroidWeightTotal);
 }
 
 uint16_t adjustedMatrixNearestMm() {
@@ -1728,33 +1755,6 @@ void updateOrientation(
       spankDetector.update(estimate.confident, estimate.medianDepthMm, now);
 }
 
-void clearMatrixMusicalPresence(uint16_t nearestAnyMm) {
-  const uint32_t now = millis();
-  updateOrientation(bearamin_orientation::SurfaceEstimate{}, now);
-  if (optical.lastMatrixPresenceMs != 0 &&
-      now - optical.lastMatrixPresenceMs <= kMatrixPresenceHoldMs) {
-    optical.matrixPresent = true;
-    optical.matrixBlobCount = 0;
-    optical.matrixZMm = nearestAnyMm;
-    return;
-  }
-  optical.matrixPresent = false;
-  optical.matrixBlobCount = 0;
-  optical.matrixZMm = nearestAnyMm;
-  optical.matrixXMilli = driftMilliTowardCenter(optical.matrixXMilli);
-  optical.matrixYMilli = driftMilliTowardCenter(optical.matrixYMilli);
-  const CvBridgeIdleState idle = cvBridgeIdleStateForCentroid(
-      optical.matrixXMilli,
-      optical.matrixYMilli,
-      kMaxBridgeValue);
-  optical.matrixXNorm = idle.x;
-  optical.matrixYNorm = idle.y;
-  optical.matrixZNorm = idle.z;
-  cvBridgeX = optical.matrixXNorm;
-  cvBridgeY = optical.matrixYNorm;
-  cvBridgeZ = optical.matrixZNorm;
-}
-
 void analyzeMatrix(uint64_t capturedUs) {
   bearfield::DepthFrame8x8 rawFrame = {};
   rawFrame.sequence = ++matrixSourceSequence;
@@ -1782,11 +1782,24 @@ void analyzeMatrix(uint64_t capturedUs) {
             ? kMatrixStatusRangingOk
             : 0;
   }
-  processedField = fieldProcessor.process(canonical, capturedUs);
+  fieldProcessor.process(canonical, capturedUs);
+  processedField = fieldProcessor.target();
   optical.matrixPresent = processedField.present;
   optical.spankGate = processedField.spankHeld;
-  optical.matrixXMilli = processedField.xMilli;
-  optical.matrixYMilli = processedField.yMilli;
+  // x/y are continuous values. Keep the 15 Hz cooked target here, while the
+  // local panel uses trajectoryOutputAxes at its native render cadence.
+  optical.matrixXMilli = processedField.present
+      ? processedField.xMilli
+      : static_cast<uint16_t>(
+            (static_cast<uint32_t>(processedField.xNorm12) * 1000UL +
+             bearamin_trajectory::kNormMaximum / 2UL) /
+            bearamin_trajectory::kNormMaximum);
+  optical.matrixYMilli = processedField.present
+      ? processedField.yMilli
+      : static_cast<uint16_t>(
+            (static_cast<uint32_t>(processedField.yNorm12) * 1000UL +
+             bearamin_trajectory::kNormMaximum / 2UL) /
+            bearamin_trajectory::kNormMaximum);
   optical.matrixZMm = processedField.zMm;
   optical.matrixXNorm = processedField.xNorm12;
   optical.matrixYNorm = processedField.yNorm12;
@@ -1796,10 +1809,17 @@ void analyzeMatrix(uint64_t capturedUs) {
   optical.orientationConfidence = processedField.orientationConfidence;
   optical.matrixValidCount = processedField.validCount;
   optical.matrixBlobCount = processedField.blobCount;
-  if (processedField.present) optical.lastMatrixPresenceMs = millis();
-  cvBridgeX = processedField.xNorm12;
-  cvBridgeY = processedField.yNorm12;
-  cvBridgeZ = processedField.zNorm12;
+  // This is deliberately not an output mapping: it only biases attractor dwell.
+  chaosTofInfluence = (static_cast<float>(processedField.xNorm12) - 2048.0f) / 4095.0f +
+      (static_cast<float>(processedField.yNorm12) - 2048.0f) / 8190.0f +
+      (static_cast<float>(processedField.zNorm12) - 2048.0f) / 12285.0f;
+  const uint32_t sourceEpochMs = millis();
+  const uint16_t targetNorm[bearamin_trajectory::kAxisCount] = {
+      processedField.xNorm12, processedField.yNorm12, processedField.zNorm12,
+      processedField.pitchNorm12, processedField.rollNorm12};
+  trajectoryAuthority.publishTarget(
+      targetNorm, sourceEpochMs,
+      bearamin_trajectory::tauForSlewStep(cvSlewStep));
 }
 
 void pollMatrix(uint32_t now) {
@@ -1814,7 +1834,6 @@ void pollMatrix(uint32_t now) {
   }
   const uint64_t readStartedUs = esp_timer_get_time();
   if (!readMatrixData()) {
-    clearMatrixMusicalPresence(0);
     optical.syntheticGate = false;
     ++matrixReadErrors;
     nextMatrixReadyCheckUs = esp_timer_get_time() + kMatrixReadyRetryUs;
@@ -1877,16 +1896,41 @@ void serviceProcessedOutput(uint64_t nowUs) {
     return;
   }
   lastProcessedOutputUs = nowUs;
-  processedField = fieldProcessor.tick(nowUs);
-  optical.matrixXNorm = processedField.xNorm12;
-  optical.matrixYNorm = processedField.yNorm12;
-  optical.matrixZNorm = processedField.zNorm12;
-  optical.pitchNorm = processedField.pitchNorm12;
-  optical.rollNorm = processedField.rollNorm12;
-  optical.spankGate = processedField.spankHeld;
-  cvBridgeX = processedField.xNorm12;
-  cvBridgeY = processedField.yNorm12;
-  cvBridgeZ = processedField.zNorm12;
+  const uint32_t nowMs = millis();
+  if (chaosUnlock.latched()) {
+    const float elapsed = chaosLastUs == 0 ? 1.0f / kProcessedOutputHz :
+        static_cast<float>(nowUs - chaosLastUs) / 1000000.0f;
+    chaosLastUs = nowUs;
+    chaosAxes = chaosLorenz.tick(elapsed, static_cast<float>(cvSlewStep) / kCvSlewMaxStep,
+                                 chaosTofInfluence);
+    trajectoryOutputAxes.norm[bearamin_trajectory::AXIS_X] = chaosAxes.x;
+    trajectoryOutputAxes.norm[bearamin_trajectory::AXIS_Y] = chaosAxes.y;
+    trajectoryOutputAxes.norm[bearamin_trajectory::AXIS_Z] = chaosAxes.z;
+    trajectoryOutputAxes.norm[bearamin_trajectory::AXIS_PITCH] = processedField.pitchNorm12;
+    trajectoryOutputAxes.norm[bearamin_trajectory::AXIS_ROLL] = processedField.rollNorm12;
+    trajectoryOutputValid = true;
+    cvBridgeX = chaosAxes.x;
+    cvBridgeY = chaosAxes.y;
+    cvBridgeZ = chaosAxes.z;
+    return;
+  }
+  const bool sourceFresh = optical.lastMatrixReadMs != 0 &&
+      nowMs - optical.lastMatrixReadMs <= kTrajectoryStaleMs;
+  if (!sourceFresh || !trajectoryAuthority.hasKeyframe() ||
+      !trajectoryAuthority.changeTau(
+          bearamin_trajectory::tauForSlewStep(cvSlewStep), nowMs) ||
+      !bearamin_trajectory::evaluateAtSourceTime(
+          trajectoryAuthority.keyframe(), nowMs, trajectoryOutputAxes)) {
+    trajectoryOutputValid = false;
+    cvBridgeX = cvBridgeCenterValue(kMaxBridgeValue);
+    cvBridgeY = cvBridgeCenterValue(kMaxBridgeValue);
+    cvBridgeZ = cvBridgeCenterValue(kMaxBridgeValue);
+    return;
+  }
+  trajectoryOutputValid = true;
+  cvBridgeX = trajectoryOutputAxes.norm[bearamin_trajectory::AXIS_X];
+  cvBridgeY = trajectoryOutputAxes.norm[bearamin_trajectory::AXIS_Y];
+  cvBridgeZ = trajectoryOutputAxes.norm[bearamin_trajectory::AXIS_Z];
 }
 
 void recoverOpticalIfNeeded(uint32_t now) {
@@ -2034,6 +2078,10 @@ void recoverOpticalIfNeeded(uint32_t now) {
 bearamin_bridge::Packet buildDptPacket() {
   bearamin_bridge::Packet packet = {};
   packet.sequence = bridgeSequence++;
+  const bool chaosActive = chaosUnlock.latched();
+  if (chaosActive) {
+    packet.flags |= bearamin_bridge::FLAG_CHAOS_ACTIVE;
+  }
   if (optical.syntheticGate) {
     packet.flags |= bearamin_bridge::FLAG_GESTURE_GATE;
   }
@@ -2082,6 +2130,34 @@ bearamin_bridge::Packet buildDptPacket() {
   packet.pitchNorm = optical.pitchNorm;
   packet.rollNorm = optical.rollNorm;
   packet.orientationConfidence = optical.orientationConfidence;
+  if (chaosActive) {
+    // Lorenz is already the cooked 30 Hz modulation source. Send its current
+    // axes as a complete v11 keyframe so DPT never falls back to the physical
+    // centroid merely because presence is absent. Gate flags remain sensor-led.
+    packet.sourceEpochMs = millis();
+    packet.matrixXNorm = chaosAxes.x;
+    packet.matrixYNorm = chaosAxes.y;
+    packet.matrixZNorm = chaosAxes.z;
+    packet.trajectoryStartNorm[bearamin_trajectory::AXIS_X] = chaosAxes.x;
+    packet.trajectoryStartNorm[bearamin_trajectory::AXIS_Y] = chaosAxes.y;
+    packet.trajectoryStartNorm[bearamin_trajectory::AXIS_Z] = chaosAxes.z;
+    packet.trajectoryStartNorm[bearamin_trajectory::AXIS_PITCH] = packet.pitchNorm;
+    packet.trajectoryStartNorm[bearamin_trajectory::AXIS_ROLL] = packet.rollNorm;
+    packet.slewTauMs = bearamin_trajectory::kMinimumTauMs;
+  } else if (trajectoryAuthority.hasKeyframe()) {
+    const bearamin_trajectory::KeyframeV1 &keyframe =
+        trajectoryAuthority.keyframe();
+    packet.sourceEpochMs = keyframe.sourceEpochMs;
+    packet.matrixXNorm = keyframe.targetNorm[bearamin_trajectory::AXIS_X];
+    packet.matrixYNorm = keyframe.targetNorm[bearamin_trajectory::AXIS_Y];
+    packet.matrixZNorm = keyframe.targetNorm[bearamin_trajectory::AXIS_Z];
+    packet.pitchNorm = keyframe.targetNorm[bearamin_trajectory::AXIS_PITCH];
+    packet.rollNorm = keyframe.targetNorm[bearamin_trajectory::AXIS_ROLL];
+    for (uint8_t axis = 0; axis < bearamin_trajectory::kAxisCount; ++axis) {
+      packet.trajectoryStartNorm[axis] = keyframe.startNorm[axis];
+    }
+    packet.slewTauMs = keyframe.slewTauMs;
+  }
   return packet;
 }
 
@@ -2101,16 +2177,21 @@ void sendDpt(uint32_t now) {
     ++dptProbeTxCount;
     lastDptProbeMs = now;
   }
-  if (now - lastDptSendMs < kDptSendMs) {
+  const bool sourceAdvanced =
+      matrixSourceSequence != lastDptSourceSequenceSent;
+  const bool heartbeatDue = now - lastDptSendMs >= kDptSendMs;
+  if (!sourceAdvanced && !heartbeatDue) {
     return;
   }
-  lastDptSendMs = now;
   const bearamin_bridge::Packet packet = buildDptPacket();
-  uint8_t frame[bearamin_bridge::kFrameSize] = {};
-  const size_t length = bearamin_bridge::encodeFrame(packet, frame, sizeof(frame));
+  uint8_t frame[bearamin_bridge::kFrameSizeV11] = {};
+  const size_t length = bearamin_bridge::encodeFrameV11(
+      packet, frame, sizeof(frame));
   if (length > 0) {
     DptSerial.write(frame, length);
     ++dptFrameTxCount;
+    lastDptSendMs = now;
+    lastDptSourceSequenceSent = matrixSourceSequence;
     captureProcessedSnapshot();
     captureDptControl(frame, length);
   }
@@ -2193,6 +2274,19 @@ void pollDptStatus() {
                   bearamin_capture::CONTROL_DPT_STATUS,
                   reinterpret_cast<const uint8_t *>(line),
                   index);
+            } else {
+              bearamin_bridge::DptTrajectoryDiagnostics trajectoryDiagnostics = {};
+              if (bearamin_bridge::decodeDptTrajectoryDiagnosticsLine(
+                      line, trajectoryDiagnostics)) {
+                dptTrajectoryDiagnostics = trajectoryDiagnostics;
+                ++dptTrajectoryDiagnosticsLineCount;
+                lastDptRxMs = millis();
+                sendPresetLineToSidecar(line);
+                captureControlRecord(
+                    bearamin_capture::CONTROL_DPT_STATUS,
+                    reinterpret_cast<const uint8_t *>(line),
+                    index);
+              }
             }
           }
         }
@@ -2299,10 +2393,49 @@ void applySidecarCommand(const bearamin_sidecar::CommandFrame &command) {
     captureSidecarCommand(command);
   } else if (command.command == bearamin_sidecar::COMMAND_CAPTURE_STOP) {
     captureRequestStop();
+  } else if (command.command == bearamin_sidecar::COMMAND_ENTER_LORENZ) {
+    chaosUnlock.force();
+    chaosLorenz.seed(
+        static_cast<uint32_t>(esp_timer_get_time()) ^ command.sequence);
+    startChaosActivationFeedback(millis());
+    serialLogPrintln("chaos=enabled source=sidecar");
   }
   if (initializesControls) {
     sidecarControlsInitialized = true;
   }
+}
+
+// NVS commits a single blob atomically; retain the old default on failed saves.
+// Open without erasing/reinitializing NVS: other system namespaces are unrelated.
+struct DefaultPresetNvs {
+  uint8_t Read(uint8_t *data, size_t &length) {
+    nvs_handle_t handle;
+    esp_err_t result = nvs_open("bearamin-boot", NVS_READONLY, &handle);
+    if (result == ESP_ERR_NVS_NOT_FOUND) return bearamin_default::kMissing;
+    if (result != ESP_OK) return bearamin_default::kStorage;
+    result = nvs_get_blob(handle, "default", data, &length);
+    nvs_close(handle);
+    if (result == ESP_ERR_NVS_NOT_FOUND) return bearamin_default::kMissing;
+    if (result == ESP_ERR_NVS_INVALID_LENGTH) return bearamin_default::kInvalid;
+    return result == ESP_OK ? bearamin_default::kOk : bearamin_default::kStorage;
+  }
+  bool Write(const uint8_t *data, size_t length) {
+    nvs_handle_t handle;
+    if (nvs_open("bearamin-boot", NVS_READWRITE, &handle) != ESP_OK) return false;
+    const bool ok = nvs_set_blob(handle, "default", data, length) == ESP_OK &&
+                    nvs_commit(handle) == ESP_OK;
+    nvs_close(handle);
+    return ok;
+  }
+};
+DefaultPresetNvs defaultPresetNvs;
+bearamin_default::Store<DefaultPresetNvs> defaultPresetStore(defaultPresetNvs);
+
+void handleDefaultPreset(const bearamin_sidecar::PresetFrame &request) {
+  const auto reply = defaultPresetStore.Handle(request);
+  uint8_t frame[bearamin_sidecar::kPresetFrameSize] = {};
+  const size_t length = bearamin_sidecar::encodePresetFrame(reply, frame, sizeof(frame));
+  if (length) SidecarSerial.write(frame, length);
 }
 
 void pollSidecarCommands() {
@@ -2324,6 +2457,9 @@ void pollSidecarCommands() {
       if (length > 0) {
         SidecarSerial.write(ack, length);
       }
+    } else if (type == bearamin_sidecar::FRAME_PRESET &&
+               bearamin_default::isOperation(preset.op)) {
+      handleDefaultPreset(preset);
     } else if (type == bearamin_sidecar::FRAME_PRESET &&
                preset.op == bearamin_sidecar::PRESET_OP_LINE &&
                preset.length > 0) {
@@ -2403,6 +2539,21 @@ bearamin_sidecar::StateFrame buildSidecarState(uint32_t now) {
   state.dptResonatorControlsRevision = dptStatus.resonatorControlsRevision;
   state.pitchNorm = optical.pitchNorm;
   state.rollNorm = optical.rollNorm;
+  if (trajectoryAuthority.hasKeyframe()) {
+    const bearamin_trajectory::KeyframeV1 &keyframe =
+        trajectoryAuthority.keyframe();
+    state.uptimeMs = keyframe.sourceEpochMs;
+    state.matrixXNorm = keyframe.targetNorm[bearamin_trajectory::AXIS_X];
+    state.matrixYNorm = keyframe.targetNorm[bearamin_trajectory::AXIS_Y];
+    state.matrixZNorm = keyframe.targetNorm[bearamin_trajectory::AXIS_Z];
+    state.pitchNorm = keyframe.targetNorm[bearamin_trajectory::AXIS_PITCH];
+    state.rollNorm = keyframe.targetNorm[bearamin_trajectory::AXIS_ROLL];
+    for (uint8_t axis = 0; axis < bearamin_trajectory::kAxisCount; ++axis) {
+      state.trajectoryStartNorm[axis] = keyframe.startNorm[axis];
+    }
+    state.trajectoryTauMs = keyframe.slewTauMs;
+    state.trajectoryValid = true;
+  }
   state.orientationConfidence = optical.orientationConfidence;
   state.sensorAgeMs = capAgeMs(optical.lastMatrixReadMs);
   state.frameErrors = sidecarFrameErrors;
@@ -2532,6 +2683,10 @@ void renderLeds(uint32_t now) {
   static uint16_t previousXMilli = 500;
   static uint16_t previousYMilli = 500;
 
+  if (renderChaosActivationFeedback(now)) {
+    return;
+  }
+
   clearLeds();
   if (optical.matrixReady) {
     for (uint8_t displayRow = 0; displayRow < kMatrixWidth; ++displayRow) {
@@ -2552,9 +2707,23 @@ void renderLeds(uint32_t now) {
     }
   }
   if (optical.matrixReady) {
-    const bool activeVector = optical.matrixPresent;
-    const uint16_t xMilli = expandVectorMilli(optical.matrixXMilli);
-    const uint16_t yMilli = expandVectorMilli(optical.matrixYMilli);
+    const bool activeVector = trajectoryOutputValid && optical.matrixPresent;
+    const uint16_t evaluatedXMilli = trajectoryOutputValid
+        ? static_cast<uint16_t>(
+              (static_cast<uint32_t>(trajectoryOutputAxes.norm[
+                   bearamin_trajectory::AXIS_X]) * 1000UL +
+               bearamin_trajectory::kNormMaximum / 2UL) /
+              bearamin_trajectory::kNormMaximum)
+        : 500;
+    const uint16_t evaluatedYMilli = trajectoryOutputValid
+        ? static_cast<uint16_t>(
+              (static_cast<uint32_t>(trajectoryOutputAxes.norm[
+                   bearamin_trajectory::AXIS_Y]) * 1000UL +
+               bearamin_trajectory::kNormMaximum / 2UL) /
+              bearamin_trajectory::kNormMaximum)
+        : 500;
+    const uint16_t xMilli = expandVectorMilli(evaluatedXMilli);
+    const uint16_t yMilli = expandVectorMilli(evaluatedYMilli);
     const int16_t dxMilli = havePreviousVector ? static_cast<int16_t>(static_cast<int32_t>(xMilli) - previousXMilli) : 0;
     const int16_t dyMilli = havePreviousVector ? static_cast<int16_t>(static_cast<int32_t>(yMilli) - previousYMilli) : 0;
     previousXMilli = xMilli;
@@ -2705,11 +2874,16 @@ void logDptDiagnostics(uint32_t now) {
   lastDptConsoleLogMs = now;
   serialLogPrintf(
       "dpt_uart ready=%u protocol=%u mode=%u age_ms=%u "
+      "trajectory_protocol=%u tau_ms=%u v11=%lu corrections=%lu "
       "rx_bytes=%lu status_lines=%lu probes_tx=%lu frames_tx=%lu\n",
       lastDptRxMs != 0 && now - lastDptRxMs <= kSidecarStatusStaleMs ? 1 : 0,
       dptStatus.protocolVersion,
       dptStatus.modeIndex,
       capAgeMs(lastDptRxMs),
+      dptTrajectoryDiagnostics.bridgeProtocolVersion,
+      dptTrajectoryDiagnostics.slewTauMs,
+      static_cast<unsigned long>(dptTrajectoryDiagnostics.v11PacketCount),
+      static_cast<unsigned long>(dptTrajectoryDiagnostics.correctionCount),
       static_cast<unsigned long>(dptRxByteCount),
       static_cast<unsigned long>(dptStatusLineCount),
       static_cast<unsigned long>(dptProbeTxCount),
@@ -2750,6 +2924,7 @@ void setup() {
   ledReady = rmtInit(kLedPin, RMT_TX_MODE, RMT_MEM_NUM_BLOCKS_1, 10000000);
   clearLeds();
   writeLeds();
+  chaosUnlock.begin(millis());
   pinMode(kDptRxPin, INPUT_PULLUP);
   DptSerial.begin(kDptBaud, SERIAL_8N1, kDptRxPin, kDptTxPin);
   SidecarSerial.setTxBufferSize(kSidecarTxBufferBytes);

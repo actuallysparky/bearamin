@@ -1,0 +1,28 @@
+diff --git a/src/vl53l8cx.h b/src/vl53l8cx.h
+index 75393d1..97bf211 100644
+--- a/src/vl53l8cx.h
++++ b/src/vl53l8cx.h
+@@ -115,6 +115,10 @@ class VL53L8CX
+       if (dev_i2c) {
+         int status = 0;
+         uint8_t buffer[2];
++        // The upstream implementation retries a NACK forever. On ESP32 that
++        // starves the Arduino loop until the task watchdog resets the board.
++        // Bound the retry so callers can report and recover from a bad bus.
++        uint8_t transmission_attempts = 0;
+         // Loop until the port is transmitted correctly
+         do {
+           dev_i2c->beginTransmission((uint8_t)((_dev.platform.address >> 1) & 0x7F));
+@@ -132,6 +136,12 @@ class VL53L8CX
+           }
+ #endif
+           // End of fix
++          if (status != 0) {
++            transmission_attempts++;
++            if (transmission_attempts >= 3) {
++              return status;
++            }
++          }
+         } while (status != 0);
+         uint32_t i = 0;
+         if (size > DEFAULT_I2C_BUFFER_LEN) {

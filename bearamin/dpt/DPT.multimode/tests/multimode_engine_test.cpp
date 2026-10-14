@@ -147,6 +147,34 @@ void TestDptPerformanceEncoding()
            == 0);
 }
 
+void TestBearaminTrajectoryDiagnosticsEncoding()
+{
+    const mm::BearaminTrajectoryDiagnostics diagnostics = {
+        mm::kBearaminVersionV11,
+        232,
+        0x11223344,
+        17,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+    };
+    char line[96] = {};
+    const size_t length = mm::EncodeBearaminTrajectoryDiagnosticsLine(
+        diagnostics, line, sizeof(line));
+    assert(length == 92);
+    assert(strcmp(line,
+                  "DPTD,1,0B,00E8,11223344,0011,00000001,00000002,"
+                  "00000003,00000004,00000005,00000006,00000007\n")
+           == 0);
+    assert(mm::EncodeBearaminTrajectoryDiagnosticsLine(
+               diagnostics, line, 92)
+           == 0);
+}
+
 mm::BearaminBridgePacket PredictorPacket(uint16_t value, uint16_t age_ms = 0)
 {
     mm::BearaminBridgePacket packet = {};
@@ -183,6 +211,65 @@ void TestBearaminPredictor()
     assert(predictor.Process(stale, 200, true).matrix_x_norm == 123);
     assert(predictor.Process(PredictorPacket(3000), 250, true).matrix_x_norm
            == 3000);
+}
+
+void TestBearaminV11Trajectory()
+{
+    mm::BearaminBridgePacket packet = PredictorPacket(4095);
+    packet.protocol_version = mm::kBearaminVersionV11;
+    packet.sequence = 7;
+    packet.source_epoch_ms = 1000;
+    packet.slew_tau_ms = 100;
+    for(size_t axis = 0; axis < 5; ++axis)
+        packet.trajectory_start_norm[axis] = 0;
+    mm::BearaminTrajectoryReconstructor reconstructor;
+    assert(reconstructor.Prepare(packet, 1.0f));
+    const mm::BearaminBridgePacket first = reconstructor.Process(packet, true);
+    assert(first.matrix_x_norm == 0);
+    const mm::BearaminBridgePacket second = reconstructor.Process(packet, true);
+    assert(second.matrix_x_norm > 0 && second.matrix_x_norm < 4095);
+    packet.sequence++;
+    assert(reconstructor.Prepare(packet, 1.0f));
+    const mm::BearaminBridgePacket heartbeat = reconstructor.Process(packet, true);
+    assert(heartbeat.matrix_x_norm > second.matrix_x_norm);
+    packet.slew_tau_ms = 42;
+    assert(!reconstructor.Prepare(packet, 1.0f));
+    packet.slew_tau_ms = 100;
+    packet.flags |= mm::kBearaminStale;
+    assert(reconstructor.Process(packet, true).matrix_x_norm == 4095);
+
+    mm::BearaminBridgePacket chaos = PredictorPacket(3072);
+    chaos.flags = mm::kBearaminChaosActive;
+    chaos.matrix_blob_count = 0;
+    chaos.protocol_version = mm::kBearaminVersionV11;
+    chaos.source_epoch_ms = 2000;
+    chaos.slew_tau_ms = 43;
+    for(size_t axis = 0; axis < 5; ++axis)
+        chaos.trajectory_start_norm[axis] = 3072;
+    mm::BearaminTrajectoryReconstructor chaos_reconstructor;
+    assert(chaos_reconstructor.Prepare(chaos, 1.0f));
+    assert(chaos_reconstructor.Process(chaos, true).matrix_x_norm == 3072);
+
+    mm::BearaminBridgePacket wire = PredictorPacket(3000, 25);
+    wire.protocol_version = mm::kBearaminVersionV11;
+    wire.sequence = 12;
+    wire.source_epoch_ms = 0x11223344;
+    wire.slew_tau_ms = 232;
+    for(size_t axis = 0; axis < 5; ++axis)
+        wire.trajectory_start_norm[axis] = 1000 + axis * 100;
+    uint8_t frame[mm::kBearaminFrameSizeV11] = {};
+    assert(mm::EncodeBearaminFrameV11(wire, frame, sizeof(frame))
+           == mm::kBearaminFrameSizeV11);
+    mm::BearaminBridgePacket decoded = {};
+    assert(mm::DecodeBearaminFrame(frame, sizeof(frame), decoded));
+    assert(decoded.protocol_version == mm::kBearaminVersionV11);
+    assert(decoded.source_epoch_ms == wire.source_epoch_ms);
+    assert(decoded.trajectory_start_norm[4] == 1400);
+    mm::BearaminBridgeParser parser;
+    bool complete = false;
+    for(size_t index = 0; index < sizeof(frame); ++index)
+        complete = parser.Push(frame[index], decoded);
+    assert(complete && decoded.protocol_version == mm::kBearaminVersionV11);
 }
 
 void TestRealtimeSnapshot()
@@ -877,6 +964,18 @@ void TestBearaminCvRouter()
     AssertClose(routed[4], 0.0f, 0.0001f);
     AssertClose(routed[5], 0.0f, 0.0001f);
 
+    // Lorenz owns the XYZ axes even without a physical blob. Its presence
+    // must not synthesize a ToF or impact gate, but it must reach the CV DAC.
+    packet.flags = mm::kBearaminChaosActive;
+    packet.matrix_blob_count = 0;
+    packet.matrix_x_norm = 0;
+    packet.matrix_y_norm = 2048;
+    packet.matrix_z_norm = 4095;
+    hold_router.Route(mm::Mode::BearaminBridge, packet, true, 768, requested, routed);
+    AssertClose(routed[3], -5.0f, 0.0001f);
+    AssertClose(routed[4], 0.0f, 0.0001f);
+    AssertClose(routed[5], 5.0f, 0.0001f);
+
 }
 
 void TestBearaminDiagnosticStatusFlags()
@@ -953,7 +1052,9 @@ int main()
     TestUnityAudioBlend();
     TestDptStatusEncoding();
     TestDptPerformanceEncoding();
+    TestBearaminTrajectoryDiagnosticsEncoding();
     TestBearaminPredictor();
+    TestBearaminV11Trajectory();
     TestRealtimeSnapshot();
     TestPresetProtocolHelpers();
     TestCarrierTune();

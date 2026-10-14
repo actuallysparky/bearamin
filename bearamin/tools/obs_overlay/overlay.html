@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Bearamin OBS Overlay</title>
+<style>
+html,body{width:100%;height:100%;margin:0;overflow:hidden;background:transparent}
+#glass{position:fixed;z-index:0;pointer-events:none;border:1px solid rgba(112,214,216,.34);border-radius:2.2vmin;background:linear-gradient(145deg,rgba(4,12,15,.88),rgba(11,20,24,.72));box-shadow:0 12px 40px rgba(0,0,0,.3),inset 0 0 30px rgba(77,244,209,.03);backdrop-filter:blur(9px);-webkit-backdrop-filter:blur(9px)}
+canvas{position:relative;z-index:1;display:block;width:100%;height:100%}
+#logo{position:fixed;z-index:2;right:3.2vmin;bottom:3.2vmin;width:18vmin;height:18vmin;object-fit:contain;filter:drop-shadow(0 0 1.8vmin rgba(77,244,209,.42))}
+#debug{position:fixed;z-index:3;left:2vmin;bottom:2vmin;color:#d8faff;background:rgba(4,12,15,.72);padding:.6vmin .9vmin;border:1px solid rgba(112,214,216,.4);border-radius:.6vmin;font:1.3vmin SFMono-Regular,Consolas,monospace;white-space:pre}
+</style>
+</head>
+<body>
+<div id="glass"></div>
+<canvas id="field"></canvas>
+<img id="logo" src="/logo.png" alt="">
+<div id="debug" hidden></div>
+<script>
+const q=new URLSearchParams(location.search),validModes=new Set(['crosshair','dots','combined']);
+const mode=validModes.has(q.get('mode'))?q.get('mode'):'crosshair';
+const scale=Math.max(.25,Math.min(2,+(q.get('scale')||1)));
+const opacity=Math.max(0,Math.min(1,+(q.get('opacity')||1)));
+const trueGridToObs=__BEARAMIN_TRUE_GRID_TO_OBS__;
+const showLogo=q.get('logo')!=='0',showOrientation=q.get('orientation')!=='0',showDebug=q.get('debug')==='1';
+const glass=document.getElementById('glass'),canvas=document.getElementById('field'),ctx=canvas.getContext('2d');
+const logo=document.getElementById('logo'),debug=document.getElementById('debug');
+logo.hidden=!showLogo;debug.hidden=!showDebug;
+let state=null,cells=null,lastStateAt=0,lastCellsAt=0;
+let rendered={x:.5,y:.5,z:.5,pitch:.5,roll:.5},from={...rendered},target={...rendered},transitionAt=0,transitionMs=50;
+let previousStateAt=0;
+const clamp=(v,a=0,b=1)=>Math.max(a,Math.min(b,v));
+const expandLedAxis=v=>clamp(.5+(clamp(v)-.5)*1.7);
+function transformTrueGridPoint(x,y){const inputX=clamp(x),inputY=clamp(y);switch(trueGridToObs.rotation_quarters){case 1:x=1-inputY;y=inputX;break;case 2:x=1-inputX;y=1-inputY;break;case 3:x=inputY;y=1-inputX;break;default:x=inputX;y=inputY}if(trueGridToObs.mirror_x)x=1-x;if(trueGridToObs.mirror_y)y=1-y;return {x,y}}
+function transformTrueGridCell(column,row){switch(trueGridToObs.rotation_quarters){case 1:[column,row]=[7-row,column];break;case 2:[column,row]=[7-column,7-row];break;case 3:[column,row]=[row,7-column];break}if(trueGridToObs.mirror_x)column=7-column;if(trueGridToObs.mirror_y)row=7-row;return {column,row}}
+function layoutGlass(w,h){const side=Math.min(w,h)*.78*scale,gw=Math.min(w*.94,side*1.25),gh=Math.min(h*.94,side*(showOrientation?1.21:1.13));glass.style.left=(w-gw)/2+'px';glass.style.top=(h-gh)/2+'px';glass.style.width=gw+'px';glass.style.height=gh+'px'}
+function resize(){const d=Math.max(1,devicePixelRatio||1),w=innerWidth,h=innerHeight;if(canvas.width!==Math.round(w*d)||canvas.height!==Math.round(h*d)){canvas.width=Math.round(w*d);canvas.height=Math.round(h*d);ctx.setTransform(d,0,0,d,0,0);layoutGlass(w,h)}}
+addEventListener('resize',resize);resize();
+function trajectorySnapshot(next){const start=next.trajectory_start_norm||[],target=[next.matrix_x_norm,next.matrix_y_norm,next.matrix_z_norm,next.pitch_norm??2048,next.roll_norm??2048],tau=+next.slew_tau_ms;
+  if(next.protocol_version!==4||start.length!==5||!Number.isFinite(tau)||tau<43||tau>420)return null;
+  const received=+next.received_unix_ms||Date.now(),elapsed=Math.max(0,(+next.sensor_age_ms||0)+Date.now()-received),decay=Math.exp(-elapsed/tau);
+  return target.map((value,index)=>clamp((value+(start[index]-value)*decay)/4095));
+}
+function receiveState(next){const now=performance.now(),present=!!next.matrix_present;
+  if(next.protocol_version===4){state=next;lastStateAt=now;return}
+  const mapped=transformTrueGridPoint(next.matrix_x_norm/4095,next.matrix_y_norm/4095);
+  const ledX=present?expandLedAxis(mapped.x):.5,ledY=present?expandLedAxis(mapped.y):.5;
+  from={...rendered};target={x:ledX,y:ledY,z:present?clamp(next.matrix_z_norm/4095):.5,pitch:clamp((next.pitch_norm??2048)/4095),roll:clamp((next.roll_norm??2048)/4095)};
+  transitionMs=previousStateAt?Math.max(20,Math.min(100,now-previousStateAt)):50;previousStateAt=now;transitionAt=now;state=next;lastStateAt=now;
+}
+function receiveCells(next){cells=next;lastCellsAt=performance.now()}
+const events=new EventSource('/events?mode='+encodeURIComponent(mode));
+events.addEventListener('state',e=>receiveState(JSON.parse(e.data)));
+events.addEventListener('cells',e=>receiveCells(JSON.parse(e.data)));
+function freshness(last,now){const age=now-last;if(!last||age>=500)return 0;if(age<=250)return 1;return 1-(age-250)/250}
+function depthColor(z,a=1){z=clamp(z);const stops=[[77,244,209],[245,221,107],[255,92,168]],p=z*2,i=Math.min(1,Math.floor(p)),t=p-i,c0=stops[i],c1=stops[Math.min(2,i+1)];return `rgba(${Math.round(c0[0]+(c1[0]-c0[0])*t)},${Math.round(c0[1]+(c1[1]-c0[1])*t)},${Math.round(c0[2]+(c1[2]-c0[2])*t)},${a})`}
+function zBarHeight(z){return 1-clamp(z)}
+function drawCrosshair(w,h,alpha){if(alpha<=0)return;const side=Math.min(w,h)*.78*scale,cx=w/2,cy=h/2,x=cx+(rendered.x-.5)*side,y=cy+(rendered.y-.5)*side,present=state&&state.matrix_present;
+  ctx.save();ctx.globalAlpha=alpha*opacity;ctx.lineCap='round';ctx.shadowBlur=14;ctx.shadowColor=depthColor(rendered.z,.7);ctx.strokeStyle=depthColor(rendered.z,.82);ctx.lineWidth=7;
+  const gap=side*.035;ctx.beginPath();ctx.moveTo(cx-side/2,y);ctx.lineTo(x-gap,y);ctx.moveTo(x+gap,y);ctx.lineTo(cx+side/2,y);ctx.moveTo(x,cy-side/2);ctx.lineTo(x,y-gap);ctx.moveTo(x,y+gap);ctx.lineTo(x,cy+side/2);ctx.stroke();
+  ctx.shadowBlur=20;ctx.fillStyle=present?depthColor(rendered.z,1):'rgba(232,251,255,.12)';ctx.strokeStyle=depthColor(rendered.z,1);ctx.lineWidth=Math.max(2,side*.005);ctx.beginPath();ctx.arc(x,y,side*.025,0,Math.PI*2);present?ctx.fill():ctx.stroke();
+  const bx=cx+side*.57,by=cy-side/2,bw=side*.035,bh=side,segments=12,lit=Math.round(zBarHeight(rendered.z)*segments);
+  ctx.shadowBlur=0;for(let i=0;i<segments;i++){const sy=by+bh-(i+1)*(bh/segments)+2;ctx.fillStyle=i<lit?depthColor(i/(segments-1),.9):'rgba(141,165,172,.16)';ctx.fillRect(bx,sy,bw,bh/segments-4)}
+  const zeroY=by+bh-zBarHeight(2048/4095)*bh;ctx.strokeStyle='rgba(220,0,255,.95)';ctx.lineWidth=Math.max(2,bw*.14);ctx.beginPath();ctx.moveTo(bx-bw*.28,zeroY);ctx.lineTo(bx+bw*1.28,zeroY);ctx.stroke();
+  ctx.restore();
+}
+function drawDots(w,h,alpha){if(alpha<=0||!cells)return;const side=Math.min(w,h)*.78*scale,left=w/2-side/2,top=h/2-side/2,step=side/8;
+  ctx.save();ctx.globalAlpha=alpha*opacity;for(let row=0;row<8;row++)for(let col=0;col<8;col++){const index=row*8+col,v=+(cells.cells_mm||[])[index]||0;if(v<25||v>705)continue;const z=clamp((705-v)/(705-25)),a=.35+.65*z,r=step*(.11+.18*z),screen=transformTrueGridCell(col,row);ctx.shadowBlur=step*.22;ctx.shadowColor=depthColor(z,.75);ctx.fillStyle=depthColor(z,a);ctx.beginPath();ctx.arc(left+(screen.column+.5)*step,top+(screen.row+.5)*step,r,0,Math.PI*2);ctx.fill()}ctx.restore();
+}
+function drawPitchDial(cx,cy,r,value,alpha){const angle=(value-.5)*Math.PI*.7;
+  ctx.save();ctx.translate(cx,cy);ctx.globalAlpha=alpha*opacity;ctx.lineCap='round';ctx.lineJoin='round';
+  ctx.strokeStyle='rgba(130,205,211,.28)';ctx.lineWidth=Math.max(2,r*.075);ctx.beginPath();ctx.arc(0,0,r,-Math.PI*.82,-Math.PI*.18);ctx.stroke();
+  ctx.strokeStyle='rgba(77,244,209,.72)';ctx.shadowBlur=r*.24;ctx.shadowColor='rgba(77,244,209,.55)';ctx.beginPath();ctx.moveTo(-r*.92,0);ctx.lineTo(r*.92,0);ctx.stroke();
+  ctx.rotate(angle);ctx.strokeStyle='rgba(232,251,255,.92)';ctx.lineWidth=Math.max(3,r*.11);ctx.beginPath();ctx.moveTo(0,r*.62);ctx.lineTo(0,-r*.68);ctx.stroke();
+  ctx.fillStyle='rgba(245,221,107,.95)';ctx.beginPath();ctx.moveTo(0,-r*.92);ctx.lineTo(-r*.18,-r*.58);ctx.lineTo(r*.18,-r*.58);ctx.closePath();ctx.fill();
+  ctx.restore();
+}
+function drawRollDial(cx,cy,r,value,alpha){const angle=(value-.5)*Math.PI*.7;
+  ctx.save();ctx.translate(cx,cy);ctx.globalAlpha=alpha*opacity;ctx.lineCap='round';ctx.lineJoin='round';
+  ctx.strokeStyle='rgba(130,205,211,.28)';ctx.lineWidth=Math.max(2,r*.075);ctx.beginPath();ctx.arc(0,0,r,Math.PI*.12,Math.PI*.88);ctx.stroke();
+  ctx.strokeStyle='rgba(77,244,209,.72)';ctx.shadowBlur=r*.24;ctx.shadowColor='rgba(77,244,209,.55)';ctx.beginPath();ctx.moveTo(0,-r*.92);ctx.lineTo(0,r*.92);ctx.stroke();
+  ctx.rotate(angle);ctx.strokeStyle='rgba(232,251,255,.92)';ctx.lineWidth=Math.max(3,r*.11);ctx.beginPath();ctx.moveTo(-r*.72,0);ctx.lineTo(r*.72,0);ctx.stroke();
+  ctx.fillStyle='rgba(255,92,168,.95)';ctx.beginPath();ctx.moveTo(r*.94,0);ctx.lineTo(r*.58,-r*.18);ctx.lineTo(r*.58,r*.18);ctx.closePath();ctx.fill();
+  ctx.restore();
+}
+function roundedPalmPath(r){ctx.beginPath();ctx.moveTo(-r*.34,r*.22);ctx.quadraticCurveTo(-r*.5,-r*.02,-r*.35,-r*.28);ctx.lineTo(-r*.08,-r*.58);ctx.lineTo(r*.46,-r*.18);ctx.quadraticCurveTo(r*.6,r*.02,r*.43,r*.25);ctx.lineTo(r*.1,r*.55);ctx.quadraticCurveTo(-r*.17,r*.67,-r*.34,r*.22);ctx.closePath()}
+function drawSpankIcon(cx,cy,r,active,alpha){const strength=active?1:.16;
+  ctx.save();ctx.translate(cx,cy);ctx.rotate(-.35);ctx.globalAlpha=alpha*opacity*strength;ctx.lineCap='round';ctx.lineJoin='round';ctx.shadowBlur=active?r*.42:0;ctx.shadowColor='rgba(255,92,168,.92)';
+  ctx.strokeStyle=active?'rgba(255,238,153,.98)':'rgba(165,190,197,.78)';ctx.fillStyle=active?'rgba(255,92,168,.88)':'rgba(105,136,145,.48)';ctx.lineWidth=Math.max(2,r*.075);
+  roundedPalmPath(r);ctx.fill();ctx.stroke();
+  const fingers=[[-.25,-.42,-.45,-.88],[-.06,-.55,-.16,-1.04],[.14,-.48,.15,-.98],[.31,-.34,.42,-.78]];
+  for(const [x0,y0,x1,y1] of fingers){ctx.beginPath();ctx.moveTo(r*x0,r*y0);ctx.lineTo(r*x1,r*y1);ctx.stroke()}
+  ctx.beginPath();ctx.moveTo(-r*.34,-r*.02);ctx.lineTo(-r*.72,-r*.28);ctx.quadraticCurveTo(-r*.88,-r*.34,-r*.83,-r*.16);ctx.stroke();
+  ctx.strokeStyle=active?'rgba(77,244,209,.95)':'rgba(130,170,178,.55)';ctx.lineWidth=Math.max(2,r*.06);
+  for(let i=0;i<3;i++){const y=r*(.72+i*.18),x=r*(-.38+i*.16);ctx.beginPath();ctx.moveTo(x-r*.23,y-r*.16);ctx.lineTo(x+r*.12,y+r*.12);ctx.stroke()}
+  ctx.restore();
+}
+function drawOrientationStrip(w,h,alpha){if(alpha<=0||!showOrientation)return;const r=Math.max(22,Math.min(w,h)*.034)*scale,spacing=r*2.65,cx=w/2,cy=h-r*1.8;
+  drawPitchDial(cx-spacing,cy,r,rendered.pitch,alpha);drawRollDial(cx,cy,r,rendered.roll,alpha);drawSpankIcon(cx+spacing,cy,r*.88,!!(state&&state.spank_gate),alpha);
+}
+function frame(now){resize();const trajectory=state&&trajectorySnapshot(state);if(trajectory){const mapped=transformTrueGridPoint(trajectory[0],trajectory[1]),present=!!state.matrix_present;rendered={x:present?expandLedAxis(mapped.x):.5,y:present?expandLedAxis(mapped.y):.5,z:present?trajectory[2]:.5,pitch:trajectory[3],roll:trajectory[4]}}else{const t=clamp((now-transitionAt)/Math.max(1,transitionMs)),s=t*t*(3-2*t);rendered={x:from.x+(target.x-from.x)*s,y:from.y+(target.y-from.y)*s,z:from.z+(target.z-from.z)*s,pitch:from.pitch+(target.pitch-from.pitch)*s,roll:from.roll+(target.roll-from.roll)*s}}ctx.clearRect(0,0,innerWidth,innerHeight);
+  const stateAlpha=freshness(lastStateAt,now),cellAlpha=freshness(lastCellsAt,now);
+  if(mode==='dots'||mode==='combined')drawDots(innerWidth,innerHeight,cellAlpha);
+  if(mode==='crosshair'||mode==='combined')drawCrosshair(innerWidth,innerHeight,stateAlpha);
+  drawOrientationStrip(innerWidth,innerHeight,stateAlpha);
+  if(showDebug){debug.textContent=`${mode} · state ${lastStateAt?Math.round(now-lastStateAt):'—'} ms · cells ${lastCellsAt?Math.round(now-lastCellsAt):'—'} ms\\n8×8 · 15 Hz source · valid ${state?state.matrix_valid_count:'—'} · blobs ${state?state.matrix_blob_count:'—'} · pitch ${state?state.pitch_norm:'—'} · roll ${state?state.roll_norm:'—'} · spank ${state&&state.spank_gate?'on':'off'}`}
+  requestAnimationFrame(frame)}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

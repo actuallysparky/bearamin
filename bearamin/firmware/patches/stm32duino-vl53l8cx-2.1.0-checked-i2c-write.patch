@@ -1,0 +1,37 @@
+diff --git a/src/vl53l8cx.h b/src/vl53l8cx.h
+index 2b08027..4c14372 100644
+--- a/src/vl53l8cx.h
++++ b/src/vl53l8cx.h
+@@ -217,23 +217,24 @@ class VL53L8CX
+         uint32_t i = 0;
+         uint8_t buffer[2];
+         while (i < size) {
+           // If still more than DEFAULT_I2C_BUFFER_LEN bytes to go, DEFAULT_I2C_BUFFER_LEN,
+           // else the remaining number of bytes
+           size_t current_write_size = (size - i > DEFAULT_I2C_BUFFER_LEN ? DEFAULT_I2C_BUFFER_LEN : size - i);
+           dev_i2c->beginTransmission((uint8_t)((_dev.platform.address >> 1) & 0x7F));
+           // Target register address for transfer
+           buffer[0] = (uint8_t)((RegisterAddress + i) >> 8);
+           buffer[1] = (uint8_t)((RegisterAddress + i) & 0xFF);
+           dev_i2c->write(buffer, 2);
+-          if (dev_i2c->write(p_values + i, current_write_size) == 0) {
++          size_t written_bytes = dev_i2c->write(p_values + i, current_write_size);
++          if (written_bytes != current_write_size) {
+             return 1;
+-          } else {
+-            i += current_write_size;
+-            if (size - i) {
+-              // Flush buffer and send stop bit so we have compatibility also with ESP32 platforms
+-              dev_i2c->endTransmission(true);
+-            }
+           }
++          uint8_t status = dev_i2c->endTransmission(true);
++          if (status != 0) {
++            return status;
++          }
++          i += current_write_size;
++          delay(0);
+         }
+-        return dev_i2c->endTransmission(true);
++        return 0;
+       }

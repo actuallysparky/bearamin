@@ -1,0 +1,345 @@
+diff --git a/src/per/adc.cpp b/src/per/adc.cpp
+index a260b752..178926ed 100644
+--- a/src/per/adc.cpp
++++ b/src/per/adc.cpp
+@@ -383,7 +383,7 @@ void AdcHandle::Init(AdcChannelConfig* cfg,
+ void AdcHandle::Start()
+ {
+     HAL_ADCEx_Calibration_Start(
+-        &adc.hadc1, ADC_CALIB_OFFSET_LINEARITY, ADC_SINGLE_ENDED);
++        &adc.hadc1, ADC_CALIB_OFFSET, ADC_SINGLE_ENDED);
+     HAL_ADC_Start_DMA(&adc.hadc1, (uint32_t*)adc.dma_buffer, adc.channels);
+ }
+ 
+diff --git a/src/per/sdmmc.cpp b/src/per/sdmmc.cpp
+index c40af0c0..f6eb272a 100644
+--- a/src/per/sdmmc.cpp
++++ b/src/per/sdmmc.cpp
+@@ -14,7 +14,7 @@ SdmmcHandler::Result SdmmcHandler::Init(const Config& cfg)
+                                    : SDMMC_CLOCK_POWER_SAVE_DISABLE;
+     hsd1.Init.BusWide
+         = cfg.width == BusWidth::BITS_1 ? SDMMC_BUS_WIDE_1B : SDMMC_BUS_WIDE_4B;
+-    hsd1.Init.HardwareFlowControl = SDMMC_HARDWARE_FLOW_CONTROL_DISABLE;
++    hsd1.Init.HardwareFlowControl = SDMMC_HARDWARE_FLOW_CONTROL_ENABLE;
+ 
+     switch(cfg.speed)
+     {
+diff --git a/src/util/bsp_sd_diskio.c b/src/util/bsp_sd_diskio.c
+index 6f94b718..af3d7fbd 100644
+--- a/src/util/bsp_sd_diskio.c
++++ b/src/util/bsp_sd_diskio.c
+@@ -33,11 +33,6 @@ uint8_t BSP_SD_Init(void)
+         {
+             sd_state = MSD_ERROR;
+         }
+-        if(HAL_SD_ConfigSpeedBusOperation(&hsd1, SDMMC_SPEED_MODE_AUTO)
+-           != HAL_OK)
+-        {
+-            sd_state = MSD_ERROR;
+-        }
+     }
+ 
+     return sd_state;
+diff --git a/src/util/sd_diskio.c b/src/util/sd_diskio.c
+index e567b238..8eb0913d 100644
+--- a/src/util/sd_diskio.c
++++ b/src/util/sd_diskio.c
+@@ -31,10 +31,22 @@
+  * the value by default is as defined in the BSP platform driver otherwise 30 secs
+  */
+ 
+-#define SD_TIMEOUT 30 * 1000
++#define SD_DEFAULT_TIMEOUT_MS (30U * 1000U)
+ 
+ #define SD_DEFAULT_BLOCK_SIZE 512
+ 
++static uint32_t sd_io_timeout_ms = SD_DEFAULT_TIMEOUT_MS;
++
++void SD_SetIoTimeout(uint32_t timeout_ms)
++{
++    sd_io_timeout_ms = timeout_ms > 0 ? timeout_ms : 1;
++}
++
++uint32_t SD_GetIoTimeout(void)
++{
++    return sd_io_timeout_ms;
++}
++
+ /*
+  * Depending on the usecase, the SD card initialization could be done at the
+  * application level, if it is the case define the flag below to disable
+@@ -139,47 +151,110 @@ DSTATUS SD_status(BYTE lun)
+ DRESULT SD_read(BYTE lun, BYTE *buff, DWORD sector, UINT count)
+ {
+     DRESULT res = RES_ERROR;
+-    ReadStatus  = 0;
+-    SdErrorFlag = 0;
+     uint32_t timeout;
++    SdErrorFlag = 0;
++
++    if(count > 1)
++    {
+ #if(ENABLE_SD_DMA_CACHE_MAINTENANCE == 1)
+-    uint32_t alignedAddr;
+-    alignedAddr = (uint32_t)buff & ~0x1F;
+-    SCB_CleanDCache_by_Addr((uint32_t *)alignedAddr,
+-                            count * BLOCKSIZE + ((uint32_t)buff - alignedAddr));
++        uint32_t alignedAddr;
++        alignedAddr = (uint32_t)buff & ~0x1F;
++        SCB_CleanDCache_by_Addr(
++            (uint32_t *)alignedAddr,
++            count * BLOCKSIZE + ((uint32_t)buff - alignedAddr));
+ #endif
+-    if(BSP_SD_ReadBlocks_DMA((uint32_t *)buff, (uint32_t)(sector), count)
+-       == MSD_OK)
+-    {
+-        /* Wait that the reading process is completed or a timeout occurs */
++        ReadStatus = 0;
++        if(BSP_SD_ReadBlocks_DMA(
++               (uint32_t *)buff, (uint32_t)sector, count)
++           != MSD_OK)
++        {
++            return RES_ERROR;
++        }
++
+         timeout = HAL_GetTick();
+-        while((ReadStatus == 0) && (SdErrorFlag == 0) && ((HAL_GetTick() - timeout) < SD_TIMEOUT)) {}
+-        /* incase of a timeout or error return error */
++        while((HAL_GetTick() - timeout) < sd_io_timeout_ms && SdErrorFlag == 0)
++        {
++            if(ReadStatus != 0)
++            {
++                break;
++            }
++        }
+         if(ReadStatus == 0 || SdErrorFlag != 0)
+         {
+-            res = RES_ERROR;
++            return RES_ERROR;
+         }
+-        else
++
++        ReadStatus = 0;
++        timeout    = HAL_GetTick();
++        while((HAL_GetTick() - timeout) < sd_io_timeout_ms && SdErrorFlag == 0)
+         {
+-            ReadStatus = 0;
+-            timeout    = HAL_GetTick();
++            if(BSP_SD_GetCardState() == SD_TRANSFER_OK)
++            {
++#if(ENABLE_SD_DMA_CACHE_MAINTENANCE == 1)
++                SCB_InvalidateDCache_by_Addr(
++                    (uint32_t *)alignedAddr,
++                    count * BLOCKSIZE + ((uint32_t)buff - alignedAddr));
++#endif
++                return RES_OK;
++            }
++        }
++
++        return RES_ERROR;
++    }
++
++    for(UINT block = 0; block < count; block++)
++    {
++        BYTE* block_buff = buff + (block * BLOCKSIZE);
++#if(ENABLE_SD_DMA_CACHE_MAINTENANCE == 1)
++        uint32_t alignedAddr;
++        alignedAddr = (uint32_t)block_buff & ~0x1F;
++        SCB_CleanDCache_by_Addr(
++            (uint32_t *)alignedAddr,
++            BLOCKSIZE + ((uint32_t)block_buff - alignedAddr));
++#endif
++        ReadStatus = 0;
++        if(BSP_SD_ReadBlocks_DMA(
++               (uint32_t *)block_buff, (uint32_t)(sector + block), 1)
++           != MSD_OK)
++        {
++            return RES_ERROR;
++        }
++
++        timeout = HAL_GetTick();
++        while((HAL_GetTick() - timeout) < sd_io_timeout_ms && SdErrorFlag == 0)
++        {
++            if(ReadStatus != 0)
++            {
++                break;
++            }
++        }
++        if(ReadStatus == 0 || SdErrorFlag != 0)
++        {
++            return RES_ERROR;
++        }
+ 
+-            while((HAL_GetTick() - timeout) < SD_TIMEOUT)
++        ReadStatus = 0;
++        timeout    = HAL_GetTick();
++        res        = RES_ERROR;
++        while((HAL_GetTick() - timeout) < sd_io_timeout_ms && SdErrorFlag == 0)
++        {
++            if(BSP_SD_GetCardState() == SD_TRANSFER_OK)
+             {
+-                if(BSP_SD_GetCardState() == SD_TRANSFER_OK)
+-                {
+-                    res = RES_OK;
+ #if(ENABLE_SD_DMA_CACHE_MAINTENANCE == 1)
+-                    /* the SCB_InvalidateDCache_by_Addr() requires a 32-Byte aligned address,
+-                     * adjust the address and the D-Cache size to invalidate accordingly. */
+-                    SCB_InvalidateDCache_by_Addr(
+-                        (uint32_t *)alignedAddr,
+-                        count * BLOCKSIZE + ((uint32_t)buff - alignedAddr));
++                /* the SCB_InvalidateDCache_by_Addr() requires a 32-Byte aligned address,
++                 * adjust the address and the D-Cache size to invalidate accordingly. */
++                SCB_InvalidateDCache_by_Addr(
++                    (uint32_t *)alignedAddr,
++                    BLOCKSIZE + ((uint32_t)block_buff - alignedAddr));
+ #endif
+-                    break;
+-                }
++                res = RES_OK;
++                break;
+             }
+         }
++        if(res != RES_OK)
++        {
++            return RES_ERROR;
++        }
+     }
+ 
+     return res;
+@@ -219,29 +294,17 @@ DRESULT SD_write(BYTE lun, const BYTE *buff, DWORD sector, UINT count)
+     SCB_CleanDCache_by_Addr((uint32_t *)alignedAddr,
+                             count * BLOCKSIZE + ((uint32_t)buff - alignedAddr));
+ #endif
+-    if(BSP_SD_WriteBlocks_DMA((uint32_t *)buff, (uint32_t)(sector), count)
++    if(BSP_SD_WriteBlocks(
++           (uint32_t *)buff, (uint32_t)(sector), count, sd_io_timeout_ms)
+        == MSD_OK)
+     {
+-        /* Wait that writing process is completed or a timeout occurs */
+         timeout = HAL_GetTick();
+-        while((WriteStatus == 0) && (SdErrorFlag == 0) && ((HAL_GetTick() - timeout) < SD_TIMEOUT)) {}
+-        /* incase of a timeout or error return error */
+-        if(WriteStatus == 0 || SdErrorFlag != 0)
++        while((HAL_GetTick() - timeout) < sd_io_timeout_ms && SdErrorFlag == 0)
+         {
+-            res = RES_ERROR;
+-        }
+-        else
+-        {
+-            WriteStatus = 0;
+-            timeout     = HAL_GetTick();
+-
+-            while((HAL_GetTick() - timeout) < SD_TIMEOUT)
++            if(BSP_SD_GetCardState() == SD_TRANSFER_OK)
+             {
+-                if(BSP_SD_GetCardState() == SD_TRANSFER_OK)
+-                {
+-                    res = RES_OK;
+-                    break;
+-                }
++                res = RES_OK;
++                break;
+             }
+         }
+     }
+diff --git a/src/util/sd_diskio.h b/src/util/sd_diskio.h
+index 85c8108d..ab944a99 100644
+--- a/src/util/sd_diskio.h
++++ b/src/util/sd_diskio.h
+@@ -1,6 +1,7 @@
+ #pragma once
+ #ifndef DSY_SD_DISKIO_H
+ #define DSY_SD_DISKIO_H
++#include "ff_gen_drv.h"
+ #ifdef __cplusplus
+ extern "C"
+ {
+@@ -10,6 +11,15 @@ extern "C"
+ 
+     extern const Diskio_drvTypeDef SD_Driver; /**< & */
+ 
++    /**
++     * Set the maximum time, in milliseconds, that an SD read or write waits
++     * for DMA completion or card-ready state. The default remains 30000 ms.
++     */
++    void SD_SetIoTimeout(uint32_t timeout_ms);
++
++    /** Return the currently configured SD I/O timeout in milliseconds. */
++    uint32_t SD_GetIoTimeout(void);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/tests/SdDiskio_gtest.cpp b/tests/SdDiskio_gtest.cpp
+new file mode 100644
+index 00000000..733ccd3b
+--- /dev/null
++++ b/tests/SdDiskio_gtest.cpp
+@@ -0,0 +1,67 @@
++#include <gtest/gtest.h>
++
++#include <fstream>
++#include <sstream>
++#include <string>
++
++namespace
++{
++std::string ReadFile(const std::string& path)
++{
++    std::ifstream input(path.c_str());
++    EXPECT_TRUE(input.good()) << path;
++    std::ostringstream buffer;
++    buffer << input.rdbuf();
++    return buffer.str();
++}
++
++std::string RepoRoot()
++{
++    std::string file = __FILE__;
++    const std::string suffix = "/tests/SdDiskio_gtest.cpp";
++    const std::string::size_type pos = file.rfind(suffix);
++    EXPECT_NE(pos, std::string::npos);
++    return file.substr(0, pos);
++}
++
++int CountOccurrences(const std::string& text, const std::string& needle)
++{
++    int count = 0;
++    std::string::size_type pos = 0;
++    while((pos = text.find(needle, pos)) != std::string::npos)
++    {
++        ++count;
++        pos += needle.size();
++    }
++    return count;
++}
++} // namespace
++
++TEST(SdDiskio, TimeoutApiMatchesDocumentedContract)
++{
++    const std::string root   = RepoRoot();
++    const std::string header = ReadFile(root + "/src/util/sd_diskio.h");
++    const std::string source = ReadFile(root + "/src/util/sd_diskio.c");
++
++    EXPECT_NE(header.find("Set the maximum time, in milliseconds"), std::string::npos);
++    EXPECT_NE(header.find("The default remains 30000 ms"), std::string::npos);
++    EXPECT_NE(header.find("void SD_SetIoTimeout(uint32_t timeout_ms);"), std::string::npos);
++    EXPECT_NE(header.find("uint32_t SD_GetIoTimeout(void);"), std::string::npos);
++
++    EXPECT_NE(source.find("#define SD_DEFAULT_TIMEOUT_MS (30U * 1000U)"), std::string::npos);
++    EXPECT_NE(source.find("static uint32_t sd_io_timeout_ms = SD_DEFAULT_TIMEOUT_MS;"), std::string::npos);
++    EXPECT_NE(source.find("sd_io_timeout_ms = timeout_ms > 0 ? timeout_ms : 1;"), std::string::npos);
++    EXPECT_NE(source.find("return sd_io_timeout_ms;"), std::string::npos);
++}
++
++TEST(SdDiskio, ReadAndWriteWaitsUseConfiguredTimeout)
++{
++    const std::string source = ReadFile(RepoRoot() + "/src/util/sd_diskio.c");
++
++    EXPECT_EQ(source.find("SD_TIMEOUT"), std::string::npos);
++    EXPECT_EQ(5, CountOccurrences(source, "< sd_io_timeout_ms"));
++    EXPECT_NE(
++        source.find("BSP_SD_WriteBlocks(\n"
++                    "           (uint32_t *)buff, (uint32_t)(sector), count, sd_io_timeout_ms)"),
++        std::string::npos);
++}

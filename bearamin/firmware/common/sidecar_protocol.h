@@ -10,7 +10,10 @@ namespace bearamin_sidecar {
 static constexpr uint8_t kStart0 = 0xBA;
 static constexpr uint8_t kStart1 = 0x4D;
 static constexpr uint8_t kVersion = 5;
-static constexpr uint8_t kStatePayloadSize = 90;
+static constexpr uint8_t kStateVersionV6 = 6;
+static constexpr uint8_t kStatePayloadSizeV5 = 90;
+static constexpr uint8_t kStatePayloadSizeV6 = 102;
+static constexpr uint8_t kStatePayloadSize = kStatePayloadSizeV6;
 static constexpr uint8_t kCommandPayloadSize = 12;
 static constexpr uint8_t kSensorDiagnosticsPayloadSize = 16;
 static constexpr uint8_t kRuntimeSettingsPayloadSize = 36;
@@ -18,7 +21,8 @@ static constexpr uint8_t kMatrixPerformancePayloadSize = 40;
 static constexpr uint8_t kPresetLinePayloadSize = 96;
 static constexpr uint8_t kPresetPayloadSize = 4 + kPresetLinePayloadSize;
 static constexpr size_t kMatrixCellsPayloadSize = 134;
-static constexpr size_t kStateFrameSize = 2 + 1 + 1 + kStatePayloadSize + 2;
+static constexpr size_t kStateFrameSizeV5 = 2 + 1 + 1 + kStatePayloadSizeV5 + 2;
+static constexpr size_t kStateFrameSize = 2 + 1 + 1 + kStatePayloadSizeV6 + 2;
 static constexpr size_t kCommandFrameSize = 2 + 1 + 1 + kCommandPayloadSize + 2;
 static constexpr size_t kSensorDiagnosticsFrameSize =
     2 + 1 + 1 + kSensorDiagnosticsPayloadSize + 2;
@@ -93,6 +97,8 @@ enum CommandId : uint8_t {
   COMMAND_REQUEST_RUNTIME_SETTINGS = 10,
   COMMAND_CAPTURE_START = 11,
   COMMAND_CAPTURE_STOP = 12,
+  // Intentionally unadvertised testing trigger for the hidden Lorenz mode.
+  COMMAND_ENTER_LORENZ = 13,
 };
 
 enum PresetOp : uint8_t {
@@ -145,6 +151,9 @@ struct StateFrame {
   uint16_t pitchNorm;
   uint16_t rollNorm;
   uint8_t orientationConfidence;
+  uint16_t trajectoryStartNorm[5] = {};
+  uint16_t trajectoryTauMs = 43;
+  bool trajectoryValid = false;
 };
 
 struct CommandFrame {
@@ -333,6 +342,10 @@ inline void encodeStatePayload(const StateFrame &state, uint8_t *payload) {
   writeLe16(payload, 85, state.pitchNorm);
   writeLe16(payload, 87, state.rollNorm);
   payload[89] = state.orientationConfidence;
+  for (uint8_t axis = 0; axis < 5; ++axis) {
+    writeLe16(payload, 90 + axis * 2, state.trajectoryStartNorm[axis]);
+  }
+  writeLe16(payload, 100, state.trajectoryTauMs);
 }
 
 inline StateFrame decodeStatePayload(const uint8_t *payload) {
@@ -380,6 +393,17 @@ inline StateFrame decodeStatePayload(const uint8_t *payload) {
   state.pitchNorm = readLe16(payload, 85);
   state.rollNorm = readLe16(payload, 87);
   state.orientationConfidence = payload[89];
+  return state;
+}
+
+inline StateFrame decodeStatePayloadV6(const uint8_t *payload) {
+  StateFrame state = decodeStatePayload(payload);
+  for (uint8_t axis = 0; axis < 5; ++axis) {
+    state.trajectoryStartNorm[axis] = readLe16(payload, 90 + axis * 2);
+  }
+  state.trajectoryTauMs = readLe16(payload, 100);
+  state.trajectoryValid = state.trajectoryTauMs >= 43 &&
+      state.trajectoryTauMs <= 420;
   return state;
 }
 
@@ -562,7 +586,7 @@ inline size_t encodeStateFrame(const StateFrame &state, uint8_t *frame, size_t c
   }
   frame[0] = kStart0;
   frame[1] = kStart1;
-  frame[2] = kVersion;
+  frame[2] = kStateVersionV6;
   frame[3] = FRAME_STATE;
   encodeStatePayload(state, frame + 4);
   const uint16_t crc = crc16Ccitt(frame, 4 + kStatePayloadSize);
@@ -661,17 +685,23 @@ inline size_t encodeMatrixPerformanceFrame(const MatrixPerformanceFrame &perform
 }
 
 inline bool decodeStateFrame(const uint8_t *frame, size_t size, StateFrame &state) {
-  if (size != kStateFrameSize || frame[0] != kStart0 ||
-      frame[1] != kStart1 || frame[2] != kVersion ||
-      frame[3] != FRAME_STATE) {
+  if (frame == nullptr || frame[0] != kStart0 || frame[1] != kStart1 ||
+      frame[3] != FRAME_STATE ||
+      (frame[2] != kVersion && frame[2] != kStateVersionV6)) {
     return false;
   }
-  const uint16_t expected = readLe16(frame, 4 + kStatePayloadSize);
-  const uint16_t actual = crc16Ccitt(frame, 4 + kStatePayloadSize);
+  const size_t payloadSize = frame[2] == kStateVersionV6
+      ? kStatePayloadSizeV6 : kStatePayloadSizeV5;
+  const size_t frameSize = 2 + 1 + 1 + payloadSize + 2;
+  if (size != frameSize) return false;
+  const uint16_t expected = readLe16(frame, 4 + payloadSize);
+  const uint16_t actual = crc16Ccitt(frame, 4 + payloadSize);
   if (expected != actual) {
     return false;
   }
-  state = decodeStatePayload(frame + 4);
+  state = frame[2] == kStateVersionV6
+      ? decodeStatePayloadV6(frame + 4)
+      : decodeStatePayload(frame + 4);
   return true;
 }
 
@@ -795,11 +825,13 @@ class Parser {
 
     buffer_[index_++] = byte;
     if (index_ == 4) {
-      if (buffer_[2] != kVersion) {
+      if (buffer_[2] != kVersion &&
+          !(buffer_[2] == kStateVersionV6 && buffer_[3] == FRAME_STATE)) {
         Reset();
         return 0;
       }
-      expectedSize_ = buffer_[3] == FRAME_STATE ? kStateFrameSize :
+      expectedSize_ = buffer_[3] == FRAME_STATE
+          ? (buffer_[2] == kStateVersionV6 ? kStateFrameSize : kStateFrameSizeV5) :
                       buffer_[3] == FRAME_MATRIX_CELLS ? kMatrixCellsFrameSize :
                       buffer_[3] == FRAME_PRESET ? kPresetFrameSize :
                       buffer_[3] == FRAME_SENSOR_DIAGNOSTICS

@@ -7,10 +7,19 @@ namespace bearamin_bridge {
 
 static constexpr uint8_t kStart0 = 0xA5;
 static constexpr uint8_t kStart1 = 0x5A;
-static constexpr uint8_t kVersion = 10;
-static constexpr uint8_t kPayloadSize = 64;
-static constexpr size_t kFrameSize = 2 + 1 + 1 + kPayloadSize + 2;
-static constexpr size_t kMaxFrameSize = kFrameSize;
+static constexpr uint8_t kVersionV10 = 10;
+static constexpr uint8_t kVersionV11 = 11;
+// Keep these aliases for v10 callers while a producer/receiver pair migrates.
+static constexpr uint8_t kVersion = kVersionV10;
+static constexpr uint8_t kPayloadSizeV10 = 64;
+static constexpr uint8_t kPayloadSizeV11 = 76;
+static constexpr uint8_t kPayloadSize = kPayloadSizeV10;
+static constexpr size_t kFrameSizeV10 = 2 + 1 + 1 + kPayloadSizeV10 + 2;
+static constexpr size_t kFrameSizeV11 = 2 + 1 + 1 + kPayloadSizeV11 + 2;
+static constexpr size_t kFrameSize = kFrameSizeV10;
+static constexpr size_t kMaxFrameSize = kFrameSizeV11;
+static_assert(kFrameSizeV10 == 70, "Bridge v10 frame size drift");
+static_assert(kFrameSizeV11 == 82, "Bridge v11 frame size drift");
 static constexpr uint8_t kDptProbe[] = {'D', 'P', 'T', '\n'};
 static constexpr size_t kDptProbeSize = sizeof(kDptProbe);
 static constexpr uint8_t kDptStatusProtocolVersion = 3;
@@ -77,7 +86,9 @@ inline void setDefaultResonatorWebControls(uint8_t controls[kResonatorWebControl
 }
 
 enum Flags : uint16_t {
-  FLAG_RESERVED_0 = 1u << 0,
+  // A hidden Lorenz run owns XYZ modulation but deliberately leaves the
+  // physical presence and impact gates under their sensor owners.
+  FLAG_CHAOS_ACTIVE = 1u << 0,
   FLAG_MATRIX_VALID = 1u << 1,
   FLAG_IMPACT_GATE = 1u << 2,
   FLAG_RESERVED_3 = 1u << 3,
@@ -228,6 +239,7 @@ inline uint32_t packResonatorMappings(uint8_t brightness,
 }
 
 struct Packet {
+  uint8_t protocolVersion = kVersionV10;
   uint16_t sequence;
   uint16_t flags;
   uint16_t reservedZMm;
@@ -255,6 +267,11 @@ struct Packet {
   uint16_t pitchNorm;
   uint16_t rollNorm;
   uint8_t orientationConfidence;
+  // v11 reuses v10's retired old-Z bytes as one source epoch and appends these
+  // trajectory fields after the unchanged 64-byte v10 payload.
+  uint32_t sourceEpochMs = 0;
+  uint16_t trajectoryStartNorm[5] = {};
+  uint16_t slewTauMs = 43;
 };
 
 struct DptStatus {
@@ -279,6 +296,20 @@ struct DptPerformance {
   uint32_t maxTxCallUs;
 };
 
+struct DptTrajectoryDiagnostics {
+  uint8_t bridgeProtocolVersion = 0;
+  uint16_t slewTauMs = 0;
+  uint32_t sourceEpochMs = 0;
+  uint16_t sourceAgeMs = 0;
+  uint32_t v10PacketCount = 0;
+  uint32_t v11PacketCount = 0;
+  uint32_t correctionCount = 0;
+  uint32_t maxCorrectionNorm = 0;
+  uint32_t invalidKeyframeCount = 0;
+  uint32_t staleTransitions = 0;
+  uint32_t deadlineMisses = 0;
+};
+
 inline uint16_t clampU16(uint32_t value, uint16_t maxValue) {
   return value > maxValue ? maxValue : static_cast<uint16_t>(value);
 }
@@ -288,9 +319,19 @@ inline void writeLe16(uint8_t *buffer, size_t offset, uint16_t value) {
   buffer[offset + 1] = static_cast<uint8_t>((value >> 8) & 0xFF);
 }
 
+inline void writeLe32(uint8_t *buffer, size_t offset, uint32_t value) {
+  writeLe16(buffer, offset, static_cast<uint16_t>(value & 0xFFFFu));
+  writeLe16(buffer, offset + 2, static_cast<uint16_t>(value >> 16));
+}
+
 inline uint16_t readLe16(const uint8_t *buffer, size_t offset) {
   return static_cast<uint16_t>(buffer[offset]) |
          (static_cast<uint16_t>(buffer[offset + 1]) << 8);
+}
+
+inline uint32_t readLe32(const uint8_t *buffer, size_t offset) {
+  return static_cast<uint32_t>(readLe16(buffer, offset)) |
+         (static_cast<uint32_t>(readLe16(buffer, offset + 2)) << 16);
 }
 
 inline int hexValue(char c) {
@@ -435,6 +476,48 @@ inline bool decodeDptPerformanceLine(const char *line, DptPerformance &performan
   return true;
 }
 
+inline bool decodeDptTrajectoryDiagnosticsLine(
+    const char *line, DptTrajectoryDiagnostics &diagnostics) {
+  if (line == nullptr || line[0] != 'D' || line[1] != 'P' ||
+      line[2] != 'T' || line[3] != 'D' || line[4] != ',' ||
+      line[5] != '1' || line[6] != ',') {
+    return false;
+  }
+  uint8_t protocol = 0;
+  uint16_t tau = 0;
+  uint32_t epoch = 0;
+  uint16_t age = 0;
+  uint32_t fields[7] = {};
+  size_t offset = 7;
+  if (!parseHexByte(line + offset, protocol)) return false;
+  offset += 2;
+  if (line[offset++] != ',' || !parseHexU16(line + offset, tau)) return false;
+  offset += 4;
+  if (line[offset++] != ',' || !parseHexU32(line + offset, epoch)) return false;
+  offset += 8;
+  if (line[offset++] != ',' || !parseHexU16(line + offset, age)) return false;
+  offset += 4;
+  for (uint8_t field = 0; field < 7; ++field) {
+    if (line[offset++] != ',' || !parseHexU32(line + offset, fields[field])) {
+      return false;
+    }
+    offset += 8;
+  }
+  if (line[offset] != '\0') return false;
+  diagnostics.bridgeProtocolVersion = protocol;
+  diagnostics.slewTauMs = tau;
+  diagnostics.sourceEpochMs = epoch;
+  diagnostics.sourceAgeMs = age;
+  diagnostics.v10PacketCount = fields[0];
+  diagnostics.v11PacketCount = fields[1];
+  diagnostics.correctionCount = fields[2];
+  diagnostics.maxCorrectionNorm = fields[3];
+  diagnostics.invalidKeyframeCount = fields[4];
+  diagnostics.staleTransitions = fields[5];
+  diagnostics.deadlineMisses = fields[6];
+  return true;
+}
+
 inline uint16_t crc16Ccitt(const uint8_t *data, size_t size) {
   uint16_t crc = 0xFFFF;
   for (size_t i = 0; i < size; ++i) {
@@ -516,7 +599,22 @@ inline Packet decodePayload(const uint8_t *payload) {
   packet.pitchNorm = readLe16(payload, 59);
   packet.rollNorm = readLe16(payload, 61);
   packet.orientationConfidence = payload[63];
+  packet.protocolVersion = kVersionV10;
   return packet;
+}
+
+inline bool validTrajectoryPacket(const Packet &packet) {
+  if (packet.slewTauMs < 43 || packet.slewTauMs > 420) return false;
+  const uint16_t targetNorm[5] = {
+      packet.matrixXNorm, packet.matrixYNorm, packet.matrixZNorm,
+      packet.pitchNorm, packet.rollNorm};
+  for (uint8_t axis = 0; axis < 5; ++axis) {
+    if (packet.trajectoryStartNorm[axis] > 4095 ||
+        targetNorm[axis] > 4095) {
+      return false;
+    }
+  }
+  return true;
 }
 
 inline size_t encodeFrame(const Packet &packet, uint8_t *frame, size_t capacity) {
@@ -534,14 +632,42 @@ inline size_t encodeFrame(const Packet &packet, uint8_t *frame, size_t capacity)
   return kFrameSize;
 }
 
+inline size_t encodeFrameV11(const Packet &packet,
+                             uint8_t *frame,
+                             size_t capacity) {
+  if (capacity < kFrameSizeV11 || !validTrajectoryPacket(packet)) {
+    return 0;
+  }
+  frame[0] = kStart0;
+  frame[1] = kStart1;
+  frame[2] = kVersionV11;
+  frame[3] = kPayloadSizeV11;
+  encodePayload(packet, frame + 4);
+  // These offsets were reserved/retired old-Z fields in v10.  Reusing them
+  // keeps the v11 growth to exactly five starts plus tau (12 bytes).
+  writeLe32(frame + 4, 4, packet.sourceEpochMs);
+  for (uint8_t axis = 0; axis < 5; ++axis) {
+    writeLe16(frame + 4, 64 + axis * 2u, packet.trajectoryStartNorm[axis]);
+  }
+  writeLe16(frame + 4, 74, packet.slewTauMs);
+  const uint16_t crc = crc16Ccitt(frame, 4 + kPayloadSizeV11);
+  writeLe16(frame, 4 + kPayloadSizeV11, crc);
+  return kFrameSizeV11;
+}
+
 inline bool decodeFrame(const uint8_t *frame, size_t size, Packet &packet) {
-  if (size != kFrameSize ||
+  if (frame == nullptr || size < 6 ||
       frame[0] != kStart0 || frame[1] != kStart1) {
     return false;
   }
   const uint8_t version = frame[2];
   const uint8_t payloadSize = frame[3];
-  if (version != kVersion || payloadSize != kPayloadSize) {
+  const size_t expectedSize = version == kVersionV10
+      ? kFrameSizeV10 : version == kVersionV11 ? kFrameSizeV11 : 0;
+  const uint8_t expectedPayloadSize = version == kVersionV10
+      ? kPayloadSizeV10 : version == kVersionV11 ? kPayloadSizeV11 : 0;
+  if (expectedSize == 0 || size != expectedSize ||
+      payloadSize != expectedPayloadSize) {
     return false;
   }
   const uint16_t expected = readLe16(frame, 4 + payloadSize);
@@ -550,6 +676,15 @@ inline bool decodeFrame(const uint8_t *frame, size_t size, Packet &packet) {
     return false;
   }
   packet = decodePayload(frame + 4);
+  if (version == kVersionV11) {
+    packet.protocolVersion = kVersionV11;
+    packet.sourceEpochMs = readLe32(frame + 4, 4);
+    for (uint8_t axis = 0; axis < 5; ++axis) {
+      packet.trajectoryStartNorm[axis] = readLe16(frame + 4, 64 + axis * 2u);
+    }
+    packet.slewTauMs = readLe16(frame + 4, 74);
+    if (!validTrajectoryPacket(packet)) return false;
+  }
   return true;
 }
 
@@ -570,8 +705,10 @@ class Parser {
     if (index_ == 4) {
       const uint8_t version = buffer_[2];
       const uint8_t payloadSize = buffer_[3];
-      if (version == kVersion && payloadSize == kPayloadSize) {
-        expectedSize_ = kFrameSize;
+      if (version == kVersionV10 && payloadSize == kPayloadSizeV10) {
+        expectedSize_ = kFrameSizeV10;
+      } else if (version == kVersionV11 && payloadSize == kPayloadSizeV11) {
+        expectedSize_ = kFrameSizeV11;
       } else {
         Reset();
         return false;
