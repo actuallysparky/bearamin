@@ -14,7 +14,10 @@ concurrency:
   group: bearamin-build-${{ inputs.product }}
   cancel-in-progress: false
 jobs:
+  validate:
+    uses: ./.github/workflows/validate.yml
   build:
+    needs: validate
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -42,7 +45,6 @@ jobs:
           elif [ "$PRODUCT" = virtual ]; then
             git clone --branch 2.1.1 --depth 1 https://github.com/raspberrypi/pico-sdk.git _release/pico-sdk
             git -C _release/pico-sdk submodule update --init --depth 1
-            ./bearamin-virtual/test.sh
             PICO_SDK_PATH="$PWD/_release/pico-sdk" INSTALLER_PUBLISH=0 ./bearamin-virtual/build.sh
             python3 field-guide/tools/prepare_release.py virtual --build bearamin-virtual/_local/rp2040-build --output _release/assets
           else
