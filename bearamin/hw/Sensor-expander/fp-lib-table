@@ -1,0 +1,10 @@
+(fp_lib_table
+  (version 7)
+  (lib
+    (name "Bearamin")
+    (type "KiCad")
+    (uri "${KIPRJMOD}/bearamin-dpt-sensor-head.pretty")
+    (options "")
+    (descr "Project-local Bearamin sensor-head footprints")
+  )
+)

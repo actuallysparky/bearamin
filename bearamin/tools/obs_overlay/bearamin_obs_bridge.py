@@ -885,11 +885,7 @@ class OverlayHttpServer(http.server.ThreadingHTTPServer):
 
 
 def default_logo_path() -> pathlib.Path:
-    engineering_root = pathlib.Path(__file__).resolve().parents[4]
-    return (
-        engineering_root
-        / "projects/bearamin/docs/bearamin/assets/bearamin-soundfield-logo-transparent-1024.png"
-    )
+    return pathlib.Path(__file__).resolve().parent / "logo.png"
 
 
 def main() -> int:

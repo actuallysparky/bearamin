@@ -1,0 +1,26 @@
+(kicad_sch
+	(version 20250114)
+	(generator "codex")
+	(generator_version "10.0")
+	(uuid "d44c6b9b-6382-4cc6-b32a-604d9c92ace6")
+	(paper "A4")
+	(title_block
+		(title "Bearamin Matrix Sidecar")
+		(date "2026-08-30")
+		(rev "D")
+		(comment 1 "Board-authoritative RevD connectivity reconstruction")
+		(comment 2 "Source: bearamin-dpt-sensor-RevD.kicad_pcb")
+		(comment 3 "C5-compatible XIAO, Matrix host, DPT link, VL53L7CX, and main-unit microSD")
+	)
+	(lib_symbols)
+	(text "REVD CONNECTIVITY SHEET\n\nThis sheet is reconstructed from the routed RevD PCB. It intentionally uses the board's current\nfootprint references and net names verbatim; the PCB remains the placement/routing authority.\n\nELECTRICAL FOOTPRINTS\nU3  Waveshare ESP32-S3-Matrix          Bearamin:Waveshare_ESP32-S3-Matrix\nU1  Seeed XIAO C5 (C5-compatible pin map)  Bearamin:XIAO-ESP32-S3-DIP\nJ3  VL53L7CX 8x8 header                Bearamin:VL53L7CX_8x8_Header\nJSD1  Micro SD Card Adapter (user-supplied)  Bearamin:MicroSD_SPI_Module_6Pin_24x42mm\nEuroplug  Eurorack power                Connector_IDC:IDC-Header_2x05_P2.54mm_Vertical\nDPTConnector  DPT expansion link        Connector_IDC:IDC-Header_2x08_P2.54mm_Vertical\n5vpower  12V-to-5V SIP3 regulator       Package_SIP:SIP3_11.6x8.5mm\nCSD1  47uF 10V low-ESR                  Capacitor_THT:CP_Radial_D6.3mm_P2.50mm\n12v test, 5v test, 3v3 test, TND test   TestPoint:TestPoint_Pad_D4.0mm\nH1-H4  M3 mounting holes                MountingHole:MountingHole_3.2mm_M3"
+		(exclude_from_sim no) (at 20 20 0) (effects (font (size 1.27 1.27)) (justify left top)) (uuid "76c48e17-c207-4c34-a031-45b3386cfa02"))
+	(text "POWER\n\nEuroplug pins 1-2: no connection\nEuroplug pins 3-8: GND\nEuroplug pins 9-10: +12V_RACK\n\n5vpower pin 1: +12V_RACK\n5vpower pin 2: GND\n5vpower pin 3: +5V\n\nCSD1 pin 1: +5V\nCSD1 pin 2: GND\n\nU3: 3V3 = +3V3, 5V = +5V, GND = GND\nU1: pin 13 = GND, pin 14 = +5V\nJ3: pin 1 = +3V3, pin 2 = GND\nJSD1: pin 1 = GND, pin 2 = +5V\nTest pads: 12v test = +12V_RACK; 5v test = +5V; 3v3 test = +3V3; TND test = GND"
+		(exclude_from_sim no) (at 20 100 0) (effects (font (size 1.0 1.0)) (justify left top)) (uuid "ee8c57bb-8fef-43ed-ab55-bf77652893c5"))
+	(text "C5 / MATRIX UART\n\nU3 GP35  -> MATRIX_TX_GPIO35_TO_XIAO_RX_D3_GPIO4 -> U1 pin 4 / D3 / GPIO4\nU1 pin 5 / D4 / GPIO5 -> XIAO_TX_D4_GPIO5_TO_MATRIX_RX_GPIO36 -> U3 GP36\n\nMATRIX SENSOR BUS\n\nU3 GP1 -> MATRIX_SDA_D0_GPIO1 -> J3 pin 4\nU3 GP2 -> MATRIX_SCL_D1_GPIO2 -> J3 pin 3\nU3 GP3 -> VL53L7CX_LPR_GPIO3 -> J3 pin 5\nJ3 pin 6: no connection\n\nDPT UART\n\nU3 GP33 -> BEARAMIN_TX_D6_GPIO43_TO_DPT_RX -> DPTConnector pin 12\nDPTConnector pin 10 -> DPT_TX_TO_BEARAMIN_RX_D7_GPIO44 -> U3 GP34\nDPTConnector pins 1, 3, 9, 13: GND\nAll other DPTConnector pins: no connection"
+		(exclude_from_sim no) (at 125 20 0) (effects (font (size 1.0 1.0)) (justify left top)) (uuid "2c10588a-03c7-4b9c-bce9-20e45441c485"))
+	(text "MICROSD SPI (validated C5 map)\n\nJSD1 pin 1 GND\nJSD1 pin 2 +5V\nJSD1 pin 3 MISO -> SD_MISO_D9_GPIO8 -> U1 pin 10 / D9 / GPIO8\nJSD1 pin 4 MOSI -> SD_MOSI_D10_GPIO9 -> U1 pin 11 / D10 / GPIO9\nJSD1 pin 5 SCK  -> SD_SCK_D8_GPIO7  -> U1 pin 9  / D8 / GPIO7\nJSD1 pin 6 CS   -> SD_CS_D2_GPIO3   -> U1 pin 3  / D2 / GPIO3\n\nU1 pins 1, 2, 6, 7, 8, and 12: no connection on RevD.\n\nASSEMBLY NOTE\n\nCSD1 is the local +5V bulk capacitor for the SD adapter. Fit 47uF, 10V-or-higher, low-ESR;\npad 1 is positive. The exact SIP3 regulator MPN must be frozen in the release BOM."
+		(exclude_from_sim no) (at 125 100 0) (effects (font (size 1.0 1.0)) (justify left top)) (uuid "9a1325d6-63a9-4b84-b947-0d1ec83d4169"))
+	(sheet_instances (path "/" (page "1")))
+	(embedded_fonts no)
+)
