@@ -1,0 +1,19 @@
+'use strict';
+const test=require('node:test'), assert=require('node:assert/strict'), fs=require('node:fs'), vm=require('node:vm'), crypto=require('node:crypto');
+const I=require('../install-protocol.js'),P=require('../protocol.js');
+function harness(model,version="0.2.0.1",updater=false){
+ const elements=new Map();const element=id=>{if(!elements.has(id))elements.set(id,{hidden:true,disabled:false,checked:false,textContent:'',addEventListener(){},setAttribute(k,v){this[k]=v;},replaceChildren(...children){this.children=children;},append(v){(this.children||=[]).push(v);}});return elements.get(id);};
+ const bytes=new Uint8Array(model==='bridge'?16*1024*1024:512), spec=I.models[model];
+ const release={schema:1,target:spec.target,hardware:spec.hardware,url:spec.url,method:spec.method,size:bytes.length,build:1,version,sha256:crypto.createHash('sha256').update(bytes).digest('hex')};
+ const input={open:async()=>{},close:async()=>{},onmidimessage:null};let requests=0;
+ const output={id:'test-port',name:model==='bridge'?'T-Dongle Wireless MIDI':'Bearamin MIDI',open:async()=>{},close:async()=>{},send(data){requests++;const query=P.decode(data);if(query?.op==='identity'&&model==='virtual')setTimeout(()=>input.onmidimessage?.({data:P.encode({op:'identity',request:query.request,data:{protocol:1,model:'virtual',hardware:'waveshare-rp2040-zero',uid:'0011223344556677',version:'0.2.0.1',build:0,capabilities:{update:updater?'sysex':false}}})}),0);if(data[1]===0x7e)setTimeout(()=>input.onmidimessage?.({data:new Uint8Array([0xf0,0x7e,0x7f,6,2,0x7d,0x41,0x42,model==='bridge'?3:2,0,0,2,0,1,0xf7])}),0);}};
+ const context=vm.createContext({document:{getElementById:element,createElement:()=>({})},window:{isSecureContext:true,addEventListener(){}},navigator:{serial:{},requestMIDIAccess:async()=>({inputs:new Map([['in',input]]),outputs:new Map([['out',output]])})},BearaminInstall:I,BearaminProtocol:P,fetch:async path=>({ok:true,json:async()=>({schema:1,products:{[model]:release}}),arrayBuffer:async()=>bytes.buffer}),URL,Blob,Uint8Array,setTimeout,clearTimeout,customElements:{whenDefined:async()=>{}}});
+ vm.runInContext(fs.readFileSync(require.resolve('../install.js'),'utf8'),context);
+ return {element,connect:()=>vm.runInContext('identify()',context),requests:()=>requests};
+}
+test('connected bridge is revealed only after MIDI discovery and uses its own verified image',async()=>{const h=harness('bridge');assert.equal(h.element('installation').hidden,true);assert.equal(h.requests(),0);await h.connect();assert.equal(h.element('device-label').textContent,'T-DONGLE WIRELESS MIDI');assert.equal(h.element('ready').hidden,false);assert.equal(h.element('installation').hidden,true);assert.equal(h.element('play-guide').href,'index.html?connect=1&model=bridge');});
+test('connected Virtual offers UF2 and never enables ESP flashing',async()=>{const h=harness('virtual','0.2.0.2');await h.connect();assert.equal(h.element('usb-install').hidden,true);assert.equal(h.element('firmware-download').download,'Bearamin-Virtual.uf2');assert.match(h.element('install-steps').children.map(v=>v.textContent).join(' '),/RPI-RP2/);assert.equal(h.element('device-label').textContent,'BEARAMIN VIRTUAL');});
+
+test("current Virtual leads to play without downloading firmware",async()=>{const h=harness("virtual");await h.connect();assert.equal(h.element("ready").hidden,false);assert.equal(h.element("installation").hidden,true);assert.equal(h.element("play-guide").href,"index.html?connect=1&model=virtual");});
+
+test("MIDI-capable older Virtual leads to an update in Field Guide",async()=>{const h=harness("virtual","0.3.0.1",true);await h.connect();assert.equal(h.element("ready").hidden,false);assert.equal(h.element("play-guide").textContent,"Update ↗");assert.equal(h.element("play-guide").href,"index.html?connect=1&model=virtual&update=1");assert.equal(h.element("usb-install").hidden,true);});

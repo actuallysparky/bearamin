@@ -1,0 +1,20 @@
+name: Validate Bearamin family
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - run: sudo apt-get update && sudo apt-get install -y libjansson-dev pkg-config
+      - run: ./bearamin/setup-dpt.sh
+      - run: ./bearamin/test.sh
+      - run: ./bearamin-lite/test.sh
+      - run: ./bearamin-virtual/test.sh
+      - run: node --test field-guide/tests/*.test.cjs
+      - run: python3 field-guide/tests/test_site.py
+      - run: python3 tools/obs-grid/test_bridge.py

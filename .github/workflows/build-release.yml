@@ -1,0 +1,85 @@
+name: Build and publish a beta
+on:
+  workflow_dispatch:
+    inputs:
+      product:
+        type: choice
+        options: [lite, virtual, full]
+        required: true
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+concurrency:
+  group: bearamin-build-${{ inputs.product }}
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: arduino/setup-arduino-cli@81d310742121c928ea9c8bbd407b4217b432ae02
+        with:
+          version: 1.4.1
+      - run: sudo apt-get update && sudo apt-get install -y gcc-arm-none-eabi libnewlib-arm-none-eabi cmake ninja-build libjansson-dev pkg-config
+      - name: Build and verify selected firmware
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRODUCT: ${{ inputs.product }}
+        run: |
+          mkdir -p _release
+          if [ "$PRODUCT" = lite ]; then
+            ./bearamin-lite/setup.sh
+            ./bearamin-lite/test.sh
+            ./bearamin-lite/build.sh
+            tag=$(gh release list --json tagName --limit 100 --jq '[.[] | select(.tagName|startswith("bearamin-lite-"))][0].tagName')
+            gh release download "$tag" --pattern 'T-Dongle-MIDI.bin' --pattern 'TDongleBridge.bin' --pattern 'partition-table.bin' --pattern 'metadata.json' --dir _release/companions
+            python3 - <<'PY_INNER'
+          import json,pathlib
+          p=pathlib.Path('_release/companions');j=json.load(open(p/'metadata.json'));(p/'family.json').write_text(json.dumps({'schema':1,'products':j['companions']}))
+          PY_INNER
+            python3 field-guide/tools/prepare_release.py lite --build bearamin-lite/_local/latest-roms/bearamin-lite-midi --companions _release/companions --output _release/assets
+          elif [ "$PRODUCT" = virtual ]; then
+            git clone --branch 2.1.1 --depth 1 https://github.com/raspberrypi/pico-sdk.git _release/pico-sdk
+            git -C _release/pico-sdk submodule update --init --depth 1
+            ./bearamin-virtual/test.sh
+            PICO_SDK_PATH="$PWD/_release/pico-sdk" INSTALLER_PUBLISH=0 ./bearamin-virtual/build.sh
+            python3 field-guide/tools/prepare_release.py virtual --build bearamin-virtual/_local/rp2040-build --output _release/assets
+          else
+            ./bearamin/setup-dpt.sh
+            ./bearamin/test.sh
+            ./bearamin/build.sh --target bearamin-sidecar-s3
+            ./bearamin/build.sh --target bearamin-matrix-vl53l7cx-s3
+            ./bearamin/build.sh --target bearamin-dpt-multimode
+            python3 field-guide/tools/prepare_release.py full --version "beta.$(date -u +%Y.%m.%d).${{ github.run_number }}" --build bearamin/_local/latest-roms --output _release/assets
+          fi
+      - name: Validate installer compatibility before publication
+        if: inputs.product != 'full'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          python3 - <<'PY_CHECK'
+          import os,pathlib,shutil,sys,json
+          sys.path.insert(0,'field-guide/tools')
+          from build_site import download_latest,assemble
+          p=pathlib.Path('_release/check');download_latest(os.environ['GH_REPO'],p)
+          product=json.load(open('_release/assets/metadata.json'))['product']
+          shutil.copytree('_release/assets',p/product,dirs_exist_ok=True)
+          assemble(pathlib.Path('field-guide'),p,pathlib.Path('_release/check-site'))
+          PY_CHECK
+      - name: Publish the verified beta
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          product=$(python3 -c 'import json;print(json.load(open("_release/assets/metadata.json"))["product"])')
+          version=$(python3 -c 'import json;print(json.load(open("_release/assets/metadata.json"))["version"])')
+          if [ "$product" = full ]; then tag="bearamin-$version"; else tag="bearamin-$product-$version"; fi
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo 'This firmware version already has a release. Bump its version before publishing changed bytes.' >&2
+            exit 1
+          fi
+          gh release create "$tag" _release/assets/* --target "${{ github.sha }}" --prerelease --title "Bearamin $product $version beta" --notes 'Beta firmware. Use the matching hardware and the Bearamin Field Guide.'
+  site:
+    needs: build
+    uses: ./.github/workflows/pages.yml

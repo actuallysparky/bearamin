@@ -51,3 +51,20 @@ main/wifi_private.h
 hw/*/*-main.kicad_pro
 hw/Sensor-expander/_archive/
 hw/bearamin-patch-14hp/bearamin-patch-14hp.kicad_pro
+
+# Private engineering records and generated publication state
+**/AGENTS.md
+**/journal.md
+**/.agents/
+**/.codex/
+**/archive/
+**/reviews/
+**/_local/
+**/*.uf2
+_site/
+_release/
+
+*.dylib
+*.so
+*.dll
+*.a
