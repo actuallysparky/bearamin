@@ -1,0 +1,1 @@
+(sym_lib_table (lib (name "BearCV_Dual") (type "KiCad") (uri "${KIPRJMOD}/BearCV_Dual.kicad_sym") (options "") (descr "BearCV project-specific module and exact-pin symbols")) (lib (name "BearCV_RevC") (type "KiCad") (uri "${KIPRJMOD}/BearCV_RevC.kicad_sym") (options "") (descr "RevC as-designed review symbols; see review provenance")))

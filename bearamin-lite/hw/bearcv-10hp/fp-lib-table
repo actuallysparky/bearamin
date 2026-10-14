@@ -1,0 +1,3 @@
+(fp_lib_table
+  (lib (name "BearCV_Potentiometer")(type "KiCad")(uri "${KIPRJMOD}/BearCV_Potentiometer.pretty")(options "")(descr "BearCV verified potentiometer trials"))
+)
