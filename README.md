@@ -2,7 +2,7 @@
 
 A whole copse of Bearamin friends. I made this family of optical instruments to turn a little motion into a lot of musical possibility.
 
-Move your hand above an 8×8 depth sensor to shape X, Y and Z, find a note, open a gate, or give it a Spank. Pick the Bearamin that fits your patch:
+Move your paw above an 8×8 depth sensor to shape X, Y and Z, find a note, open a gate, or give it a Spank. Pick the Bearamin that fits your patch:
 
 | Bearamin | What it does | What you need |
 | --- | --- | --- |
@@ -12,9 +12,7 @@ Move your hand above an 8×8 depth sensor to shape X, Y and Z, find a note, open
 
 ## Find your sound
 
-The shared **[Bearamin Field Guide](https://actuallysparky.github.io/bearamin/)** connects to Lite and Virtual, helps you map motion to MIDI, and offers the latest firmware for your device. Full Bearamin keeps its own sidecar browser interface for sound controls and presets.
-
-The Field Guide lives in [`field-guide/`](field-guide/). USB MIDI works with Lite and Virtual; Bluetooth MIDI works with Lite. Use a browser that supports Web MIDI, such as Chrome or Edge.
+The shared **[Bearamin Field Guide](https://actuallysparky.github.io/bearamin/)** hangs out in a cave by Salmon Lake and connects to Bearamin Lite and Bearamin Virtual, helping you map motion to MIDI, get the latest firmware for your device, and generally be cool af. USB MIDI works with Lite and Virtual; Bluetooth MIDI works with Lite. Use a browser that supports Web MIDI, such as Chrome or Edge.
 
 ## See Bearamin in action
 
