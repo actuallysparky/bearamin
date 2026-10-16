@@ -1,0 +1,22 @@
+{
+  "slug": "BearaminVirtual",
+  "name": "Bearamin Virtual",
+  "version": "2.0.1",
+  "license": "GPL-3.0-or-later",
+  "brand": "Bearamin",
+  "author": "Bearamin project",
+  "description": "USB VL53L7CX gesture controller for VCV Rack",
+  "modules": [
+    {
+      "slug": "BearaminVirtual",
+      "name": "Bearamin Virtual",
+      "description": "8x8 depth field with six CVs and two gates",
+      "tags": [
+        "Controller"
+      ]
+    }
+  ],
+  "pluginUrl": "https://actuallysparky.github.io/bearamin/",
+  "manualUrl": "https://github.com/actuallysparky/bearamin/blob/main/bearamin-virtual/README.md",
+  "sourceUrl": "https://github.com/actuallysparky/bearamin"
+}

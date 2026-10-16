@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 Bearamin contributors
+
 #pragma once
 #include <bearfield/bearfield.h>
 #include <jansson.h>

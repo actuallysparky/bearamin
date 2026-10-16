@@ -42,4 +42,4 @@ This family also builds on the [Electro-Smith Daisy ecosystem](https://github.co
 
 ## License
 
-The existing Bearamin source and hardware use the [MIT License](LICENSE). Third-party files retain their upstream licenses and notices. Virtual’s Rack plugin currently identifies its license as proprietary in `plugin.json`; publication does not change that designation.
+The existing Bearamin source and hardware use the [MIT License](LICENSE). Third-party files retain their upstream licenses and notices. Virtual’s Rack plugin is licensed under GPL-3.0-or-later; its bundled Bearfield processor retains the MIT License.

@@ -27,3 +27,11 @@ Firmware uses Pico SDK 2.1.1. Rack builds require the Rack 2 SDK and Jansson. MI
 ## Build
 
 Set `PICO_SDK_PATH` to Pico SDK 2.1.1 with its submodules, then run `./test.sh` and `./build.sh`. Build the Rack plugin with `make -C vcv/BearaminVirtual RACK_DIR=/path/to/Rack-SDK`, followed by its `dist` target.
+
+## VCV Rack plugin
+
+The Rack plugin is version **2.0.1**, licensed under **GPL-3.0-or-later**. The shared Bearfield processor retains its MIT license; both license notices are included in the plugin package.
+
+Download the matching `.vcvplugin` package from the [Rack plugin release](https://github.com/actuallysparky/bearamin/releases/tag/rack-BearaminVirtual-2.0.1). This release includes a macOS ARM64 package. Place it in Rack's `plugins-mac-arm64` folder and restart Rack. Requires the Bearamin Virtual RP2040-Zero and VL53L7CX sensor; the plugin reads its USB serial stream.
+
+From the repository root, run `make RACK_DIR=/path/to/Rack-SDK dist` to build the Rack package. The root build forwards to `bearamin-virtual/vcv/BearaminVirtual/` and publishes its output in the root `dist/` directory. Windows, Linux and Intel Mac runtime behavior has not yet been verified.

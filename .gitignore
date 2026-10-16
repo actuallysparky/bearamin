@@ -68,3 +68,6 @@ _release/
 *.so
 *.dll
 *.a
+
+# Root VCV Rack build adapter output
+/dist/
