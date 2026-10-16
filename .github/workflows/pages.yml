@@ -16,6 +16,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   pages:
+    if: ${{ github.event_name != 'release' || startsWith(github.event.release.tag_name, 'bearamin-') }}
     runs-on: ubuntu-24.04
     environment:
       name: github-pages
