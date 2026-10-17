@@ -8,6 +8,11 @@ on:
         type: string
         required: true
         default: rack-BearaminVirtual-2.0.1
+      platform:
+        description: Platform to build
+        type: choice
+        options: [all, linux, windows]
+        default: all
       source_commit:
         description: Exact source commit of the release
         type: string
@@ -28,6 +33,7 @@ env:
 
 jobs:
   linux:
+    if: inputs.platform != 'windows'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -83,6 +89,7 @@ jobs:
         run: gh release upload "$RELEASE_TAG" dist/*-lin-x64.vcvplugin dist/SHA256SUMS-lin-x64 dist/BUILDINFO-lin-x64.txt --repo "$GITHUB_REPOSITORY"
 
   windows:
+    if: inputs.platform != 'linux'
     runs-on: windows-2022
     steps:
       - name: Keep LF endings
@@ -97,7 +104,7 @@ jobs:
           msystem: MINGW64
           update: true
           install: >-
-            mingw-w64-x86_64-gcc mingw-w64-x86_64-jansson mingw-w64-x86_64-pkgconf git make jq zstd unzip curl file
+            mingw-w64-x86_64-gcc mingw-w64-x86_64-jansson mingw-w64-x86_64-pkgconf git make jq zstd unzip curl file diffutils
       - name: Build and verify Windows x64 package
         shell: msys2 {0}
         run: |
