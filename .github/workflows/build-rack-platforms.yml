@@ -1,0 +1,148 @@
+name: Build Rack Linux and Windows packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing Rack release tag
+        type: string
+        required: true
+        default: rack-BearaminVirtual-2.0.1
+      source_commit:
+        description: Exact source commit of the release
+        type: string
+        required: true
+        default: 6f4aabf8c6937446d7302dfc83e481450614074a
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rack-platforms-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ inputs.release_tag }}
+  SOURCE_COMMIT: ${{ inputs.source_commit }}
+  RACK_SDK_VERSION: 2.6.6
+
+jobs:
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.release_tag }}
+          persist-credentials: false
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y g++ make jq zstd unzip curl file libjansson-dev pkg-config
+      - name: Build and verify Linux x64 package
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+          version=$(jq -r .version plugin.json)
+          test "$RELEASE_TAG" = "rack-BearaminVirtual-$version"
+          test "$(jq -r .slug plugin.json)" = BearaminVirtual
+          test "$(jq -r .license plugin.json)" = GPL-3.0-or-later
+          mkdir -p _local/sdk
+          curl --fail --location --retry 3 "https://vcvrack.com/downloads/Rack-SDK-${RACK_SDK_VERSION}-lin-x64.zip" -o _local/sdk.zip
+          unzip -q _local/sdk.zip -d _local/sdk
+          test -f _local/sdk/Rack-SDK/plugin.mk
+          make dist RACK_DIR="$PWD/_local/sdk/Rack-SDK"
+          package="dist/BearaminVirtual-$version-lin-x64.vcvplugin"
+          test -s "$package"
+          zstd -dc "$package" | tar -tf - > _local/package-contents.txt
+          for entry in plugin.so plugin.json LICENSE LICENSE-BEARFIELD res/BearaminVirtual.svg; do
+            grep -Fxq "BearaminVirtual/$entry" _local/package-contents.txt
+          done
+          mkdir -p _local/package-check
+          zstd -dc "$package" | tar -xf - -C _local/package-check
+          plugin=bearamin-virtual/vcv/BearaminVirtual
+          for entry in plugin.json LICENSE LICENSE-BEARFIELD res/BearaminVirtual.svg; do
+            cmp "$plugin/$entry" "_local/package-check/BearaminVirtual/$entry"
+          done
+          file _local/package-check/BearaminVirtual/plugin.so | tee _local/binary-format.txt
+          grep -Fq 'ELF 64-bit' _local/binary-format.txt
+          for test in wire protocol output; do
+            extra=()
+            if [ "$test" = protocol ]; then
+              read -r -a extra <<< "$(pkg-config --cflags --libs jansson)"
+            fi
+            g++ -std=c++17 -Wall -Wextra -Werror -Ibearamin-virtual/third_party/bearfield-core/include "bearamin-virtual/test/test_bearamin_virtual_${test}.cpp" -o "_local/$test" "${extra[@]}"
+            "_local/$test"
+          done
+          compiler=$(g++ --version | sed -n '1p')
+          sdk_sha=$(sha256sum _local/sdk.zip | cut -d ' ' -f 1)
+          printf 'Plugin: BearaminVirtual\nVersion: %s\nSource commit: %s\nRack SDK: %s\nSDK SHA-256: %s\nPlatform: lin-x64\nCompiler: %s\nValidation: native build, architecture, archive, manifest, licenses and wire/protocol/output tests passed.\nPhysical controller/Rack session: not exercised on this platform.\n' "$version" "$SOURCE_COMMIT" "$RACK_SDK_VERSION" "$sdk_sha" "$compiler" > dist/BUILDINFO-lin-x64.txt
+          (cd dist && sha256sum "$(basename "$package")" BUILDINFO-lin-x64.txt > SHA256SUMS-lin-x64)
+      - name: Attach verified Linux assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$RELEASE_TAG" dist/*-lin-x64.vcvplugin dist/SHA256SUMS-lin-x64 dist/BUILDINFO-lin-x64.txt --repo "$GITHUB_REPOSITORY"
+
+  windows:
+    runs-on: windows-2022
+    steps:
+      - name: Keep LF endings
+        shell: pwsh
+        run: git config --global core.autocrlf input
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.release_tag }}
+          persist-credentials: false
+      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc mingw-w64-x86_64-jansson mingw-w64-x86_64-pkgconf git make jq zstd unzip curl file
+      - name: Build and verify Windows x64 package
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+          version=$(jq -r .version plugin.json)
+          test "$RELEASE_TAG" = "rack-BearaminVirtual-$version"
+          test "$(jq -r .slug plugin.json)" = BearaminVirtual
+          test "$(jq -r .license plugin.json)" = GPL-3.0-or-later
+          mkdir -p _local/sdk
+          curl --fail --location --retry 3 "https://vcvrack.com/downloads/Rack-SDK-${RACK_SDK_VERSION}-win-x64.zip" -o _local/sdk.zip
+          unzip -q _local/sdk.zip -d _local/sdk
+          test -f _local/sdk/Rack-SDK/plugin.mk
+          make dist RACK_DIR="$PWD/_local/sdk/Rack-SDK"
+          package="dist/BearaminVirtual-$version-win-x64.vcvplugin"
+          test -s "$package"
+          zstd -dc "$package" | tar -tf - > _local/package-contents.txt
+          for entry in plugin.dll plugin.json LICENSE LICENSE-BEARFIELD res/BearaminVirtual.svg; do
+            grep -Fxq "BearaminVirtual/$entry" _local/package-contents.txt
+          done
+          mkdir -p _local/package-check
+          zstd -dc "$package" | tar -xf - -C _local/package-check
+          plugin=bearamin-virtual/vcv/BearaminVirtual
+          for entry in plugin.json LICENSE LICENSE-BEARFIELD res/BearaminVirtual.svg; do
+            cmp "$plugin/$entry" "_local/package-check/BearaminVirtual/$entry"
+          done
+          file _local/package-check/BearaminVirtual/plugin.dll | tee _local/binary-format.txt
+          grep -Fq 'PE32+' _local/binary-format.txt
+          for test in wire protocol output; do
+            extra=()
+            if [ "$test" = protocol ]; then
+              read -r -a extra <<< "$(pkg-config --cflags --libs jansson)"
+            fi
+            g++ -std=c++17 -Wall -Wextra -Werror -Ibearamin-virtual/third_party/bearfield-core/include "bearamin-virtual/test/test_bearamin_virtual_${test}.cpp" -o "_local/$test" "${extra[@]}"
+            "_local/$test"
+          done
+          compiler=$(g++ --version | sed -n '1p')
+          sdk_sha=$(sha256sum _local/sdk.zip | cut -d ' ' -f 1)
+          printf 'Plugin: BearaminVirtual\nVersion: %s\nSource commit: %s\nRack SDK: %s\nSDK SHA-256: %s\nPlatform: win-x64\nCompiler: %s\nValidation: native build, architecture, archive, manifest, licenses and wire/protocol/output tests passed.\nPhysical controller/Rack session: not exercised on this platform.\n' "$version" "$SOURCE_COMMIT" "$RACK_SDK_VERSION" "$sdk_sha" "$compiler" > dist/BUILDINFO-win-x64.txt
+          (cd dist && sha256sum "$(basename "$package")" BUILDINFO-win-x64.txt > SHA256SUMS-win-x64)
+      - name: Attach verified Windows assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = (Get-Content plugin.json | ConvertFrom-Json).version
+          gh release upload $env:RELEASE_TAG "dist/BearaminVirtual-$version-win-x64.vcvplugin" dist/SHA256SUMS-win-x64 dist/BUILDINFO-win-x64.txt --repo $env:GITHUB_REPOSITORY
