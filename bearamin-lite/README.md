@@ -1,5 +1,7 @@
 # Bearamin Lite
 
+For VCV Rack, use **Bearamin Lite, powered by Bearamin Virtual**, in the [Bearamin VCV collection](https://github.com/actuallysparky/Bearamin-VCV). It uses the USB Bearamin Virtual sensor controller to provide the Lite-style controls and CV/gate outputs in Rack.
+
 A small optical controller for your Eurorack patch, with USB MIDI and Bluetooth MIDI for the rest of your studio.
 
 Move above the VL53L7CX sensor to control X/Y/Z CV in unipolar and bipolar ranges, Presence and Spank gates. The ESP32-S3 Matrix supplies the depth display; Range and Slew keep the gesture response close at hand. Lite uses two MCP4728 DACs and has no DPT dependency.

@@ -1,5 +1,7 @@
 # Bearamin
 
+The [Bearamin VCV collection](https://github.com/actuallysparky/Bearamin-VCV) brings together **SloFO** and **Bearamin Lite, powered by Bearamin Virtual**, in one Rack plugin. Hardware and firmware continue here. The existing standalone Rack 2.0.1 release remains available for legacy patches.
+
 A whole copse of Bearamin friends. I made this family of optical instruments to turn a little motion into a lot of musical possibility.
 
 Move your paw above an 8×8 depth sensor to shape X, Y and Z, find a note, open a gate, or give it a Spank. Pick the Bearamin that fits your patch:

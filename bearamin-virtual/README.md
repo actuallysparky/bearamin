@@ -1,5 +1,7 @@
 # Bearamin Virtual
 
+The [Bearamin VCV collection](https://github.com/actuallysparky/Bearamin-VCV) brings together **SloFO** and **Bearamin Lite, powered by Bearamin Virtual**, in one Rack plugin. Hardware and firmware continue here. The existing standalone Rack 2.0.1 release remains available for legacy patches.
+
 An optical gesture controller for VCV Rack and USB MIDI. The display lives in Rack; the hardware stays small.
 
 A Waveshare RP2040-Zero connects to a VL53L7CX 8×8 depth sensor through the six-pin carrier. It presents USB serial and class-compliant USB MIDI at the same time, so Rack and your DAW can share the controller without a bridge process.
