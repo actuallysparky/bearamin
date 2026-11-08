@@ -6,7 +6,3 @@
 - Preserve unrelated work and ignored build/history artifacts. Run ./test.sh and build with the configured Pico SDK; inspect build-side publication behavior before running offline tasks.
 - Separate source/build, flash, runtime and physical evidence. Host tests and a compiled installer do not establish physical sensor, MIDI, voltage, timing or flash acceptance.
 - Authorized firmware changes require a new version when the bytes change; a version must not identify conflicting payloads. Device writes require exact target verification.
-
-## Agent-assisted collaboration
-
-These instructions make AI-assisted development and review visible. Preserve accurate human, agent and upstream attribution; do not imply sole authorship or manufacture contributor identities. Keep secrets, personal details, device identities and private operational records out of the published source.

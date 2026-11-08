@@ -6,7 +6,3 @@
 - Use ./test.sh and inspect ./build.sh --list-targets before building. Disable publishing side effects for an offline/source-only task; do not flash without explicit device authorization.
 - A successful firmware build or DAC provisioning receipt does not prove output voltage, rail health, calibration, orientation or physical behavior. Keep those acceptance checks distinct.
 - Preserve manufacturing/review lineage and accepted limitations; a prior release or GO is not automatic approval of a changed board.
-
-## Agent-assisted collaboration
-
-These instructions make AI-assisted development and review visible. Preserve accurate human, agent and upstream attribution; do not imply sole authorship or manufacture contributor identities. Keep secrets, personal details, device identities and private operational records out of the published source.
