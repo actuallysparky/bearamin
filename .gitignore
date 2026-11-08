@@ -53,7 +53,6 @@ hw/Sensor-expander/_archive/
 hw/bearamin-patch-14hp/bearamin-patch-14hp.kicad_pro
 
 # Private engineering records and generated publication state
-**/AGENTS.md
 **/journal.md
 **/.agents/
 **/.codex/
