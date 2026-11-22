@@ -9,6 +9,8 @@
 #include "runtime_service.h"
 #include "family_identity.h"
 #include "editor_settings_json.h"
+#include "gesture_processing.h"
+#include "preview_cadence.h"
 #include "mbedtls/sha256.h"
 #include "hardware/watchdog.h"
 #include "pico/bootrom.h"
@@ -33,7 +35,7 @@ bearamin_safety::SensorHealth health;
 bearamin_safety::MidiOutput midiOutput;
 #include "editor_runtime.h"
 void applyEditorConfig() {
- auto p=bearfield::BearCvV1();p.minimumDepthMm=config.near;p.playableMaximumMm=config.far;p.fadeMaximumMm=config.far+150;p.maximumSourceDepthMm=config.far+150;p.presenceHoldMs=config.hold;p.minimumBlobCells=config.cells;p.spankMaximumDepthMm=config.spankDepth;p.spankMinimumApproachMmPerSecond=config.spankSpeed;p.spankRefractoryMs=config.cooldown;p.axisTauSeconds=p.depthTauSeconds=config.smoothing/1000.0f;processor=bearfield::Processor(p);
+ processor=bearfield::Processor(virtual_editor::feelProfile(config));
  const uint8_t cc[]={uint8_t(config.ccX),uint8_t(config.ccY),uint8_t(config.ccZ),uint8_t(config.ccPresence)};midiOutput.configure(config.channel-1,cc,config.note);noteHeld=false;
 }
 
@@ -70,10 +72,8 @@ bool beginSensor() {
 void publishFrame() {
   const uint64_t captured = time_us_64();
   health.frame(captured);
-  serial(bearamin_virtual::frameLine(line, sizeof(line), bootId, sequence++, captured,
-                                     result.distance_mm, result.target_status));
   bearfield::DepthFrame8x8 depth{};
-  depth.sequence = sequence - 1;
+  depth.sequence = sequence;
   depth.capturedUs = captured;
   for (unsigned i = 0; i < 64; ++i) {
     if (bearamin_virtual::validZone(result.distance_mm[i], result.target_status[i])) {
@@ -81,21 +81,20 @@ void publishFrame() {
       depth.validMask |= uint64_t{1} << i;
     }
   }
-  bearfield::SensorMountConfig mount{};mount.rawToCanonical.rotation=static_cast<bearfield::QuarterTurns>(config.rotation/90);mount.rawToCanonical.mirrorX=config.mirror;
-  auto canonical=bearfield::orientFrame(depth,mount);const auto field = processor.process(canonical, captured);
+  auto canonical = virtual_editor::orient(depth, config);
+  const auto field = processor.process(canonical, captured);
+  const auto gesture = virtual_editor::gesture(field, config);
+  serial(bearamin_virtual::frameLine(line, sizeof(line), bootId, sequence++, captured,
+                                   result.distance_mm, result.target_status, &gesture));
   if(!editorSaving) {
-    const uint8_t ch=config.channel-1;
-    midi(0xb0|ch,config.ccX,field.present?virtual_editor::mapAxis(field.xNorm12,config.curveX,config.invertX):0);
-    midi(0xb0|ch,config.ccY,field.present?virtual_editor::mapAxis(field.yNorm12,config.curveY,config.invertY):0);
-    midi(0xb0|ch,config.ccZ,field.present?virtual_editor::mapAxis(field.zNorm12,config.curveZ,config.invertZ):0);
-    if(config.presenceEnabled)midi(0xb0|ch,config.ccPresence,field.present?127:0);
-    const bool held=config.spankEnabled&&field.spankHeld;
-    if(held!=noteHeld){midi((held?0x90:0x80)|ch,config.note,held?config.velocity:0);noteHeld=held;}
+    virtual_editor::performanceMidi(field, config, noteHeld, midi);
   }
   editorPreview(canonical,field);
 }
 void sensorFault() {
   health.fault(time_us_64());
+  previewPending=false;
+  if(editorIsPreview&&!editorOffset){editorLength=0;editorIsPreview=false;}
   processor.reset();
   noteHeld = false;
   midiOutput.silence();
@@ -117,13 +116,12 @@ void bearamin_service_usb() {
   }
   if (usbSessionChanged) {
     usbSessionChanged = false; midiOutput.disconnect(); noteHeld = false;
-    identity.pending = false;standardPending=false;editorDecoder.reset();editorPending=false;editorLength=editorOffset=0;previewUntil=0;editorSaving=false;
+    identity.pending = false;standardPending=false;editorDecoder.reset();editorPending=false;editorLength=editorOffset=0;editorIsPreview=false;editorStopPreview();editorSaving=false;
   }
   const bool mounted = tud_midi_mounted() && !tud_suspended();
   if (!mounted) noteHeld = false;
   if(standardPending&&!editorLength){standardPending=false;editorOffset=0;bearamin_identity_reply(2, [](const uint8_t*p){memcpy(editorWire+editorLength,p+1,3);editorLength+=3;});}
-  if(editorSend())return;
-  midiOutput.service(mounted, [](const uint8_t* packet) { return tud_midi_packet_write(packet); });
+  editorService(mounted);
 }
 
 int main() {

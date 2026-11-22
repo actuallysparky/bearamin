@@ -4,6 +4,7 @@
 #include "hardware/sync.h"
 #include "pico/unique_id.h"
 #include <cstdlib>
+#include "preview_cadence.h"
 // One bounded JSON arena, reused only after documents leave scope. No heap growth.
 struct EditorArena : ArduinoJson::Allocator {
   alignas(max_align_t) uint8_t bytes[24576]; size_t used=0;
@@ -17,7 +18,13 @@ uint8_t editorWire[virtual_editor::kMaxWire];size_t editorLength=0,editorOffset=
 char editorJson[virtual_editor::kMaxJson+1],editorUid[17];
 bool editorPending=false,editorApply=false,editorSaving=false;
 uint32_t editorParseErrors=0,editorCin[16]={};
-uint32_t editorRevision=0,previewUntil=0,previewAt=0,editorFrames=0;
+uint32_t editorRevision=0,editorFrames=0;
+virtual_editor::PreviewCadence previewCadence;
+bearfield::DepthFrame8x8 previewDepth;
+bearfield::ProcessedFieldState previewField;
+bool previewPending=false,editorIsPreview=false;
+uint32_t previewSent=0,previewDropped=0;
+void editorStopPreview(){previewCadence.subscribe(0,uint32_t(time_us_64()/1000));previewPending=false;if(editorIsPreview&&!editorOffset){editorLength=0;editorIsPreview=false;}}
 constexpr uint32_t kSettingsOffset=2*1024*1024-2*FLASH_SECTOR_SIZE;
 struct EditorRecord {uint32_t magic,schema,revision;virtual_editor::Settings settings;uint32_t crc;};
 bool recordValid(const EditorRecord&r){return r.magic==0x42565254&&r.schema==1&&r.revision&&r.crc==virtual_editor::crc32(reinterpret_cast<const uint8_t*>(&r),offsetof(EditorRecord,crc))&&virtual_editor::valid(r.settings);}
@@ -33,9 +40,10 @@ bool editorPersist(const virtual_editor::Settings&s){
  return !memcmp(reinterpret_cast<const void*>(XIP_BASE+offset),&r,sizeof(r));
 }
 #include "midi_update.h"
-void editorQueue(JsonDocument&doc){if(doc.overflowed())return;size_t n=measureJson(doc);if(n>virtual_editor::kMaxJson)return;serializeJson(doc,editorJson,sizeof(editorJson));editorLength=virtual_editor::encode(editorJson,n,editorWire,sizeof(editorWire));editorOffset=0;}
+void editorQueue(JsonDocument&doc,bool isPreview=false){if(doc.overflowed())return;size_t n=measureJson(doc);if(n>virtual_editor::kMaxJson)return;serializeJson(doc,editorJson,sizeof(editorJson));editorLength=virtual_editor::encode(editorJson,n,editorWire,sizeof(editorWire));editorOffset=0;editorIsPreview=isPreview;}
 void editorError(JsonDocument&d,const char*s){d["op"]="error";d["error"]=s;d.remove("data");}
 void editorHandle(){
+ if(editorPending&&editorIsPreview&&editorOffset==0){editorLength=0;editorIsPreview=false;++previewDropped;}
  if(!editorPending||editorLength)return;editorPending=false;editorArena.used=0;
  JsonDocument req(&editorArena),reply(&editorArena);
  if(deserializeJson(req,editorDecoder.json,DeserializationOption::NestingLimit(6))||!req["request"].is<uint32_t>()||!req["op"].is<const char*>()){++editorParseErrors;return;}
@@ -44,12 +52,12 @@ void editorHandle(){
  reply["op"]=op;reply["request"]=req["request"];reply["uid"]=editorUid;auto data=reply["data"].to<JsonObject>();
  if(!strcmp(op,"identity")){
   if(!req["data"]["protocol"].is<int>()||req["data"]["protocol"].as<int>()!=1)editorError(reply,"Unsupported protocol.");
-  else {data["protocol"]=1;data["uid"]=editorUid;data["model"]="virtual";data["hardware"]="waveshare-rp2040-zero";data["version"]=BEARAMIN_EDITOR_VERSION;data["build"]=0;data["transport"]="USB MIDI";auto c=data["capabilities"].to<JsonObject>();c["settings"]=true;c["field"]=true;c["diagnostics"]=true;c["display"]=false;c["ble"]=false;c["update"]="sysex";c["bootSel"]=true;data["updateAbi"]=virtual_update::kAbi;}
+  else {data["protocol"]=1;data["uid"]=editorUid;data["model"]="virtual";data["hardware"]="waveshare-rp2040-zero";data["version"]=BEARAMIN_EDITOR_VERSION;data["build"]=0;data["transport"]="USB MIDI";auto c=data["capabilities"].to<JsonObject>();c["settings"]=true;c["field"]=true;auto rates=c["fieldRates"].to<JsonArray>();rates.add(15);c["diagnostics"]=true;c["display"]=false;c["ble"]=false;c["update"]="sysex";c["bootSel"]=true;data["updateAbi"]=virtual_update::kAbi;}
  }else if(!strncmp(op,"update.",7)){
   if(!strcmp(op,"update.bootsel")){midiUpdater.recoveryAt=uint32_t(time_us_64()/1000)+500;data["ok"]=true;}
   else if(!midiUpdater.active&&strcmp(op,"update.begin"))editorError(reply,"Start the update again.");
   else if(!strcmp(op,"update.begin")){
-   if(!editorSaving){editorSaving=true;midiOutput.silence();previewUntil=0;}
+   if(!editorSaving){editorSaving=true;midiOutput.silence();editorStopPreview();}
    if(!midiOutput.quiet()){editorPending=true;return;}
    if(!midiUpdater.begin(req["data"]["release"].as<JsonObjectConst>()))editorError(reply,"This firmware is not compatible with your Bearamin.");
    else {health.fault(time_us_64());data["chunkSize"]=256;data["offset"]=0;}
@@ -71,15 +79,41 @@ void editorHandle(){
    else {config=next;++editorRevision;editorApply=true;data["revision"]=editorRevision;}
    editorSaving=false;
   }
- }else if(!strcmp(op,"diagnostics.read")){data["sensor"]=health.ready?"Ready":"Not receiving";data["sensorHz"]=health.ready?15:0;data["sourceFrames"]=editorFrames;data["uptimeMs"]=uint32_t(time_us_64()/1000);data["rejectedMessages"]=editorDecoder.rejected;data["parseErrors"]=editorParseErrors;data["updateOffset"]=midiUpdater.offset;auto counters=data["inputPackets"].to<JsonArray>();for(auto n:editorCin)counters.add(n);}
- else if(!strcmp(op,"field.subscribe")){if(!req["data"]["hz"].is<int>()||(req["data"]["hz"].as<int>()!=0&&req["data"]["hz"].as<int>()!=5))editorError(reply,"Choose a supported preview rate.");else {previewUntil=req["data"]["hz"].as<int>()?uint32_t(time_us_64()/1000)+300000:0;data["hz"]=req["data"]["hz"];}}
+ }else if(!strcmp(op,"diagnostics.read")){data["sensor"]=health.ready?"Ready":"Not receiving";data["sensorHz"]=health.ready?15:0;data["sourceFrames"]=editorFrames;data["previewHz"]=previewCadence.active(uint32_t(time_us_64()/1000))?previewCadence.hz():0;data["previewSent"]=previewSent;data["previewDropped"]=previewDropped;data["uptimeMs"]=uint32_t(time_us_64()/1000);data["rejectedMessages"]=editorDecoder.rejected;data["parseErrors"]=editorParseErrors;data["updateOffset"]=midiUpdater.offset;auto counters=data["inputPackets"].to<JsonArray>();for(auto n:editorCin)counters.add(n);}
+ else if(!strcmp(op,"field.subscribe")){
+  if(!req["data"]["hz"].is<double>()||!virtual_editor::PreviewCadence::supported(req["data"]["hz"].as<double>()))editorError(reply,"Choose a supported preview rate.");
+  else {previewCadence.subscribe(req["data"]["hz"].as<double>(),uint32_t(time_us_64()/1000));if(!previewCadence.divisor)previewPending=false;data["hz"]=previewCadence.hz();}
+ }
  else editorError(reply,"This operation is unavailable on Virtual.");
  editorQueue(reply);
 }
 void editorPacket(const uint8_t*p){unsigned cin=p[0]&15;++editorCin[cin];unsigned n=cin==15?1:cin==4?3:cin==5?1:cin==6?2:cin==7?3:0;if(!editorPending)for(unsigned i=0;i<n;++i)if(editorDecoder.feed(p[i+1],uint32_t(time_us_64()/1000)))editorPending=true;}
 void editorPreview(const bearfield::DepthFrame8x8&depth,const bearfield::ProcessedFieldState&field){
- ++editorFrames;uint32_t now=time_us_64()/1000;if(!previewUntil||int32_t(previewUntil-now)<=0||now-previewAt<200||editorLength||editorPending)return;previewAt=now;editorArena.used=0;JsonDocument d(&editorArena);d["op"]="field";d["uid"]=editorUid;auto a=d["data"].to<JsonObject>();auto mm=a["mm"].to<JsonArray>();for(unsigned i=0;i<64;++i){if((depth.validMask>>i)&1)mm.add(depth.distanceMm[i]);else mm.add(nullptr);}a["x"]=virtual_editor::mapAxis(field.xNorm12,config.curveX,config.invertX);a["y"]=virtual_editor::mapAxis(field.yNorm12,config.curveY,config.invertY);a["z"]=virtual_editor::mapAxis(field.zNorm12,config.curveZ,config.invertZ);a["presence"]=field.present;a["spank"]=field.spankHeld;editorQueue(d);
+ ++editorFrames;const uint32_t now=uint32_t(time_us_64()/1000);
+ if(!previewCadence.active(now)){previewPending=false;return;}
+ const bool due=previewCadence.frame(now);
+ if(due||previewPending){if(previewPending)++previewDropped;previewDepth=depth;previewField=field;previewPending=true;}
+}
+void editorFlushPreview(){
+ if(!previewPending||editorLength||editorPending)return;
+ previewPending=false;
+ if(!previewCadence.active(uint32_t(time_us_64()/1000))||time_us_64()-previewDepth.capturedUs>bearamin_safety::kFreshFrameUs){++previewDropped;return;}
+ editorArena.used=0;JsonDocument d(&editorArena);d["op"]="field";d["uid"]=editorUid;auto a=d["data"].to<JsonObject>();
+ a["seq"]=previewDepth.sequence;a["captureUs"]=previewDepth.capturedUs;
+ auto mm=a["mm"].to<JsonArray>();for(unsigned i=0;i<64;++i){if((previewDepth.validMask>>i)&1)mm.add(previewDepth.distanceMm[i]);else mm.add(nullptr);}
+ a["x"]=virtual_editor::mapAxis(previewField.xNorm12,config.curveX,config.invertX);a["y"]=virtual_editor::mapAxis(previewField.yNorm12,config.curveY,config.invertY);a["z"]=virtual_editor::mapAxis(previewField.zNorm12,config.curveZ,config.invertZ);a["presence"]=previewField.present;a["spank"]=previewField.spankHeld;editorQueue(d,true);
 }
 bool editorSend(){
- for(unsigned i=0;i<16&&editorLength;++i){size_t n=std::min<size_t>(3,editorLength-editorOffset);uint8_t p[4]={uint8_t(editorOffset+n==editorLength?4+n:4),0,0,0};memcpy(p+1,editorWire+editorOffset,n);if(!tud_midi_packet_write(p))return true;editorOffset+=n;if(editorOffset==editorLength)editorLength=editorOffset=0;}return editorLength!=0;
+ for(unsigned i=0;i<16&&editorLength;++i){size_t n=std::min<size_t>(3,editorLength-editorOffset);uint8_t p[4]={uint8_t(editorOffset+n==editorLength?4+n:4),0,0,0};memcpy(p+1,editorWire+editorOffset,n);if(!tud_midi_packet_write(p))return true;editorOffset+=n;if(editorOffset==editorLength){if(editorIsPreview)++previewSent;editorIsPreview=false;editorLength=editorOffset=0;}}return editorLength!=0;
+}
+
+// A started SysEx must finish intact. At each message boundary, drain retained
+// performance/safety packets before starting a command reply or latest preview.
+void editorService(bool mounted){
+ if(editorOffset){editorSend();return;}
+ midiOutput.service(mounted,[](const uint8_t*p){return tud_midi_packet_write(p);});
+ if(!mounted||midiOutput.pending())return;
+ if(editorLength){editorSend();return;}
+ if(editorPending)return;
+ editorFlushPreview();editorSend();
 }

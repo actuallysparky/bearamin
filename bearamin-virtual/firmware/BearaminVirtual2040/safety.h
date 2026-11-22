@@ -22,6 +22,7 @@ struct SensorHealth {
 // packets. "Sent" means accepted into TinyUSB's FIFO, not acknowledged by a DAW.
 class MidiOutput {
  public:
+  bool pending() const { return !connected_ || cleanup_ < 2 || sentNote_ != wantNote_ || dirty_[0] || dirty_[1] || dirty_[2] || dirty_[3]; }
   bool quiet() const { return !sentNote_&&!wantNote_&&!dirty_[0]&&!dirty_[1]&&!dirty_[2]&&!dirty_[3]; }
   void configure(uint8_t channel,const uint8_t*cc,uint8_t note) {channel_=channel;for(unsigned i=0;i<4;++i)cc_[i]=cc[i];note_=note;}
   void disconnect() { connected_ = false; }

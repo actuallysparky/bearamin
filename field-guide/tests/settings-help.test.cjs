@@ -7,3 +7,13 @@ test('fields show current values rather than substituting help defaults',()=>{co
 test('Bluetooth instructions are available before connecting and on Lite, USB only on Virtual',()=>{for(const model of [null,'lite']){const view=ui(model);assert.match(view.system,/Connect by Bluetooth/);assert.match(view.system,/Audio MIDI Setup/);assert.match(view.system,/Within two minutes/);}assert.doesNotMatch(ui('virtual').system,/Connect by Bluetooth/);assert.match(ui('virtual').system,/Connect by USB/);});
 
 test('mirror help matches the device firmware defaults',()=>{assert.match(ui("lite").help.mirror,/on for Lite; off for Virtual/);});
+
+test('Virtual describes firmware and Rack requirements and the saved patch opt-in',()=>{
+ const view=ui('virtual');
+ assert.match(view.midi,/Bearamin 2\.1\.2/);
+ assert.match(view.midi,/firmware 0\.3\.0\.5/);
+ assert.match(view.midi,/Follow Field Guide settings/);
+ assert.match(view.midi,/Gesture smoothing/);
+ assert.match(view.help.smoothing,/MIDI and VCV/);
+ assert.doesNotMatch(view.system,/data-key="(?:brightness|displayEnabled)"/);
+});

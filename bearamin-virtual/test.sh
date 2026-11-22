@@ -15,3 +15,6 @@ echo 'Bearamin Virtual source tests passed'
 "$ROOT/_local/tests/family-identity"
 
 python3 "$ROOT/tests/test_editor.py"
+
+"${CXX:-c++}" -std=c++17 -Wall -Wextra -Werror -I"$ROOT/third_party/bearfield-core/include" "$ROOT/test/test_gesture_processing.cpp" -o "$ROOT/_local/tests/gesture-processing"
+"$ROOT/_local/tests/gesture-processing" "$ROOT/_local/tests/gesture-fixtures.jsonl"

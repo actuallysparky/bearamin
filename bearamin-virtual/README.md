@@ -1,3 +1,5 @@
+<!-- {"canonical_sha256": "fd1e4a6dd3b4559d82a10a8e27a0a8c530263823b4e8571db58f5fefd4c08778", "canonical_source": "engineering:Bearamin-publication/bearamin-virtual/README.md", "editing": "Edit the canonical Obsidian source; regenerate this copy.", "generated": true, "vault_commit": null} -->
+
 # Bearamin Virtual
 
 The [Bearamin VCV collection](https://github.com/actuallysparky/Bearamin-VCV) brings together **SloFO** and **Bearamin Lite, powered by Bearamin Virtual**, in one Rack plugin. Hardware and firmware continue here. The existing standalone Rack 2.0.1 release remains available for legacy patches.
@@ -14,6 +16,8 @@ In your DAW, choose **Bearamin Virtual** as a MIDI input. Defaults: channel 1, C
 
 Open the [Bearamin Field Guide](https://actuallysparky.github.io/bearamin/) to change MIDI and gesture settings or install the current firmware. After the initial UF2 installation, compatible application updates transfer through MIDI and preserve saved settings. The full UF2 includes the recovery loader; firmware before the new loader requires that initial installation.
 
+Virtual firmware **0.3.0.5** and the [Bearamin VCV plugin **2.1.2**](https://github.com/actuallysparky/Bearamin-VCV/releases/tag/v2.1.2) share saved Field Guide gesture settings across MIDI and Rack. This includes orientation, sensing limits, curves, inversion, smoothing and Presence/Spank behavior. Save changes in Field Guide. In existing Rack patches, enable **Follow Field Guide settings** in the module context menu. Range and Slew remain on the Rack panel.
+
 ## Sources
 
 - `firmware/BearaminVirtual2040/`: Pico SDK firmware, sensor driver and recovery loader.
@@ -24,7 +28,7 @@ These are beta releases. Sensor wiring is GP12 SDA, GP9 SCL, GP14 LPn and GP13 I
 
 Firmware uses Pico SDK 2.1.1. Rack builds require the Rack 2 SDK and Jansson. MIDI updates verify SHA-256 integrity and accept a trusted USB host; they are not signed updates.
 
-[Family, credits and licensing](../README.md)
+[Family, credits and licensing](<../README.md>)
 
 ## Build
 

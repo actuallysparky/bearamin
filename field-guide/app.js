@@ -28,14 +28,14 @@ const settingHelp={
   spankSpeed:'Sets the minimum speed of a hand moving toward the sensor to trigger Spank. Default: 250 mm/s.',
   spankDepth:'Sets how close your hand must be to trigger Spank. Default: 150 mm.',
   cooldown:'Sets the shortest wait between Spank triggers, helping prevent double hits. Default: 300 ms.',
-  smoothing:'Softens rapid changes in Virtual’s outgoing MIDI movement values. Default: 40 ms.',
+  smoothing:'Softens rapid changes in Virtual’s MIDI and VCV movement values. Rack Slew adds further smoothing. Default: 40 ms.',
   mirror:'Flips left and right across the sensing field. Default: on for Lite; off for Virtual.',
   displayEnabled:'Turns the LED feedback on or off. Default: on.',
   brightness:'Sets LED brightness within the device’s limited brightness range. Default: 50%; Max is the allowed brightness cap.',
 };
 for(const a of ['X','Y','Z']){
   settingHelp['curve'+a]=`Changes how ${a} movement responds: linear is even, gentle softens the response, and steep makes it stronger. Default: linear.`;
-  settingHelp['invert'+a]=`Reverses the direction of the ${a} MIDI values. Default: off.`;
+  settingHelp['invert'+a]=`Reverses the direction of the ${a} movement values. Default: off.`;
 }
 function help(key,label){return `<button type="button" class="help-button" data-help="${key}" aria-label="Help for ${html(label)}" aria-describedby="help-${key}">?</button><span id="help-${key}" class="help-copy">${html(settingHelp[key])}</span>`;}
 function fieldLabel(key,label){return `<div class="field-label"><label for="f-${key}">${label}</label>${help(key,label)}</div>`;}
@@ -56,7 +56,7 @@ function midiPage(){if(device?.model==='bridge')return firmwarePrompt()+card('YO
   return firmwarePrompt()+`<section class="hero compact"><div><span class="eyebrow">MAKE MOTION YOURS.</span><h1>MIDI &<br><em>gestures.</em></h1><p>${device?html(names[device.model])+' · Choose your voice. Tune the feel.':'A whole copse of Bearamin friends. Connect yours and make motion yours.'}</p>${!device?action('connect','Connect your Bearamin ↗','primary'):''}</div>${device?.model==='virtual'?'':'<img src="panel.png" alt="Bearamin Lite Eurorack panel">'}</section>`+
   card('YOUR VOICE','MIDI mapping',`<div class="form-grid">${select('channel','MIDI channel',Array.from({length:16},(_,i)=>[i+1,'Channel '+(i+1)]))}${select('rate','Response rate',device?.model==='virtual'?[[15,'15 Hz']]:[[15,'15 Hz'],[30,'30 Hz']])}</div><div class="mapping-head"><span>AXIS</span><span>CC</span><span>FEEL</span><span>DIRECTION</span></div>${rows}`)+
   card('GESTURE EVENTS','Presence & Spank',`<div class="form-grid">${number('ccPresence','Presence CC')}${number('hold','Release hold (ms)')}</div><div class="form-grid">${number('note','Spank note')}${number('velocity','Velocity')}</div>`)+
-  card('PLAYABLE SPACE','Gesture settings',`<div class="form-grid">${select('rotation','Orientation',[[0,'0°'],[90,'90°'],[180,'180°'],[270,'270°']])}${number('cells','Minimum sensing cells')}${number('near','Near distance (mm)')}${number('far','Far distance (mm)')}${number('spankSpeed','Spank approach speed (mm/s)')}${number('spankDepth','Spank distance (mm)')}${number('cooldown','Spank retrigger delay (ms)')}${device?.model==='virtual'?number('smoothing','MIDI smoothing (ms)'):''}</div>${toggle('mirror','Mirror left / right')}<p class="micro">${device?.model==='virtual'?'Range and Slew in VCV Rack remain in the plugin.':'Range and Slew remain on the performance knobs.'}</p>`);
+  card('PLAYABLE SPACE','Gesture settings',`<div class="form-grid">${select('rotation','Orientation',[[0,'0°'],[90,'90°'],[180,'180°'],[270,'270°']])}${number('cells','Minimum sensing cells')}${number('near','Near distance (mm)')}${number('far','Far distance (mm)')}${number('spankSpeed','Spank approach speed (mm/s)')}${number('spankDepth','Spank distance (mm)')}${number('cooldown','Spank retrigger delay (ms)')}${device?.model==='virtual'?number('smoothing','Gesture smoothing (ms)'):''}</div>${toggle('mirror','Mirror left / right')}<p class="micro">${device?.model==='virtual'?'For VCV, install <a href="https://github.com/actuallysparky/Bearamin-VCV/releases/tag/v2.1.2" target="_blank" rel="noopener">Bearamin 2.1.2</a> and Virtual firmware 0.3.0.5 or newer. In existing patches, enable Follow Field Guide settings in the module menu. Range and Slew remain in Rack.':'Range and Slew remain on the performance knobs.'}</p>`);
 }
 function systemPage(){
   const r=release(), state=['virtual','bridge'].includes(device?.model)&&r?BearaminInstall.versionState(device.version,r.version):P.updateState(device,r);

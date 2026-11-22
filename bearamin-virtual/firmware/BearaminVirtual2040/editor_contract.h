@@ -22,11 +22,17 @@ inline bool valid(const Settings&s) {
   for(int i=0;i<(s.presenceEnabled?4:3);++i)for(int j=0;j<i;++j)if(cc[i]==cc[j])return false;
   return s.channel>=1&&s.channel<=16&&s.rate==15&&s.curveX>=0&&s.curveX<=2&&s.curveY>=0&&s.curveY<=2&&s.curveZ>=0&&s.curveZ<=2&&s.note>=0&&s.note<=127&&s.velocity>=1&&s.velocity<=127&&s.near>=20&&s.near<=1000&&s.far>=50&&s.far<=1500&&s.near<s.far&&s.hold>=0&&s.hold<=1000&&s.cells>=1&&s.cells<=64&&s.spankSpeed>=50&&s.spankSpeed<=2000&&s.spankDepth>=20&&s.spankDepth<=500&&s.cooldown>=50&&s.cooldown<=2000&&(s.rotation==0||s.rotation==90||s.rotation==180||s.rotation==270)&&s.brightness>=0&&s.brightness<=100&&s.smoothing>=0&&s.smoothing<=500;
 }
-inline uint8_t mapAxis(uint16_t norm,int curve,bool invert) {
+inline float axisValue(uint16_t norm,int curve,bool invert) {
   float v=norm>4095?1.0f:norm/4095.0f;
   if(invert)v=1-v;
   if(curve==1)v=std::sqrt(v); else if(curve==2)v=v*v;
-  return static_cast<uint8_t>(std::lround(v*127));
+  return v;
+}
+inline uint8_t mapAxis(uint16_t norm,int curve,bool invert) {
+  return static_cast<uint8_t>(std::lround(axisValue(norm,curve,invert)*127));
+}
+inline uint16_t mapAxis12(uint16_t norm,int curve,bool invert) {
+  return static_cast<uint16_t>(std::lround(axisValue(norm,curve,invert)*4095));
 }
 inline uint8_t brightnessRaw(int percent){return static_cast<uint8_t>((percent*32+50)/100);}
 inline bool pairingOpen(uint32_t now,uint32_t start){return uint32_t(now-start)<kPairingMs;}
