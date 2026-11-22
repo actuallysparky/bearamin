@@ -8,11 +8,11 @@ test('Bluetooth instructions are available before connecting and on Lite, USB on
 
 test('mirror help matches the device firmware defaults',()=>{assert.match(ui("lite").help.mirror,/on for Lite; off for Virtual/);});
 
-test('Virtual describes firmware and Rack requirements and the saved patch opt-in',()=>{
+test('Virtual describes firmware and Rack requirements and automatic existing-patch behavior',()=>{
  const view=ui('virtual');
  assert.match(view.midi,/Bearamin 2\.1\.2/);
  assert.match(view.midi,/firmware 0\.3\.0\.5/);
- assert.match(view.midi,/Follow Field Guide settings/);
+ assert.match(view.midi,/apply automatically in new and existing Rack modules/);
  assert.match(view.midi,/Gesture smoothing/);
  assert.match(view.help.smoothing,/MIDI and VCV/);
  assert.doesNotMatch(view.system,/data-key="(?:brightness|displayEnabled)"/);

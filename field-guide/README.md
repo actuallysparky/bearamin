@@ -1,4 +1,4 @@
-<!-- {"canonical_sha256": "d3c3a95bddf385822ff3e28b5e48e2652a8684b900d542b79d698a679fa92a0e", "canonical_source": "engineering:Bearamin-publication/field-guide/README.md", "editing": "Edit the canonical Obsidian source; regenerate this copy.", "generated": true, "vault_commit": null} -->
+<!-- {"canonical_sha256": "61e19bac39da691d9b0e438f004fd183fc96f0a1e50f768bd079579b9764155e", "canonical_source": "engineering:Bearamin-publication/field-guide/README.md", "editing": "Edit the canonical Obsidian source; regenerate this copy.", "generated": true, "vault_commit": null} -->
 
 # Bearamin Field Guide
 
@@ -19,4 +19,4 @@ Use the repository’s **Build and publish a beta** workflow and choose Lite, Vi
 
 ## Virtual settings in VCV Rack
 
-Use Virtual firmware 0.3.0.5 or newer with the [Bearamin VCV plugin 2.1.2](https://github.com/actuallysparky/Bearamin-VCV/releases/tag/v2.1.2). Save your Field Guide changes to apply them to MIDI and Rack. In existing patches, enable **Follow Field Guide settings** in the module context menu. Range and Slew stay in Rack. Older plugins continue their own raw-depth processing.
+Use Virtual firmware 0.3.0.5 or newer with the [Bearamin VCV plugin 2.1.2](https://github.com/actuallysparky/Bearamin-VCV/releases/tag/v2.1.2). Save your Field Guide changes to apply them to MIDI and Rack. New and existing Rack modules follow the saved device settings automatically. Range and Slew stay in Rack. Older plugins continue their own raw-depth processing.

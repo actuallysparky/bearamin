@@ -1,4 +1,4 @@
-<!-- {"canonical_sha256": "fd1e4a6dd3b4559d82a10a8e27a0a8c530263823b4e8571db58f5fefd4c08778", "canonical_source": "engineering:Bearamin-publication/bearamin-virtual/README.md", "editing": "Edit the canonical Obsidian source; regenerate this copy.", "generated": true, "vault_commit": null} -->
+<!-- {"canonical_sha256": "296ecef8d96a0026bfc0231df1ea08da751ec00e11a24227a8433bd1b79b3940", "canonical_source": "engineering:Bearamin-publication/bearamin-virtual/README.md", "editing": "Edit the canonical Obsidian source; regenerate this copy.", "generated": true, "vault_commit": null} -->
 
 # Bearamin Virtual
 
@@ -16,7 +16,7 @@ In your DAW, choose **Bearamin Virtual** as a MIDI input. Defaults: channel 1, C
 
 Open the [Bearamin Field Guide](https://actuallysparky.github.io/bearamin/) to change MIDI and gesture settings or install the current firmware. After the initial UF2 installation, compatible application updates transfer through MIDI and preserve saved settings. The full UF2 includes the recovery loader; firmware before the new loader requires that initial installation.
 
-Virtual firmware **0.3.0.5** and the [Bearamin VCV plugin **2.1.2**](https://github.com/actuallysparky/Bearamin-VCV/releases/tag/v2.1.2) share saved Field Guide gesture settings across MIDI and Rack. This includes orientation, sensing limits, curves, inversion, smoothing and Presence/Spank behavior. Save changes in Field Guide. In existing Rack patches, enable **Follow Field Guide settings** in the module context menu. Range and Slew remain on the Rack panel.
+Virtual firmware **0.3.0.5** and the [Bearamin VCV plugin **2.1.2**](https://github.com/actuallysparky/Bearamin-VCV/releases/tag/v2.1.2) share saved Field Guide gesture settings across MIDI and Rack. This includes orientation, sensing limits, curves, inversion, smoothing and Presence/Spank behavior. Save changes in Field Guide. New and existing Rack modules follow the saved device settings automatically. Range and Slew remain on the Rack panel.
 
 ## Sources
 
