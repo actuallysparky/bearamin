@@ -1,4 +1,4 @@
-<!-- {"canonical_sha256": "61e19bac39da691d9b0e438f004fd183fc96f0a1e50f768bd079579b9764155e", "canonical_source": "engineering:Bearamin-publication/field-guide/README.md", "editing": "Edit the canonical Obsidian source; regenerate this copy.", "generated": true, "vault_commit": null} -->
+<!-- {"canonical_sha256": "5f09cacd0b34a581133058812d818f89d98f60b556b208da7d6345d45f3d00e4", "canonical_source": "engineering:Bearamin-publication/field-guide/README.md", "editing": "Edit the canonical Obsidian source; regenerate this copy.", "generated": true, "vault_commit": null} -->
 
 # Bearamin Field Guide
 
@@ -20,3 +20,5 @@ Use the repository’s **Build and publish a beta** workflow and choose Lite, Vi
 ## Virtual settings in VCV Rack
 
 Use Virtual firmware 0.3.0.5 or newer with the [Bearamin VCV plugin 2.1.2](https://github.com/actuallysparky/Bearamin-VCV/releases/tag/v2.1.2). Save your Field Guide changes to apply them to MIDI and Rack. New and existing Rack modules follow the saved device settings automatically. Range and Slew stay in Rack. Older plugins continue their own raw-depth processing.
+
+With Virtual firmware 0.3.0.6 and Rack plugin 2.1.3, the Field Guide and Rack grids use the saved Near/Far distances. Near is full brightness, Far is the dim edge, and farther cells are inactive. Unsaved edits do not alter the live preview. CV processing is unchanged. Older Virtual firmware remains usable; Rack falls back to its previous display range when range metadata is absent.

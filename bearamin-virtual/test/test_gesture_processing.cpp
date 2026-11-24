@@ -131,9 +131,11 @@ int main(int argc,char** argv) {
         for(bool presence:{false,true})for(bool spank:{false,true}) {
           field.present=present;
           Settings cfg;cfg.rotation=rotation;cfg.mirror=mirror;
+          cfg.near=100;cfg.far=rotation==0?300:900;
           cfg.curveX=cfg.curveY=cfg.curveZ=curve;cfg.invertX=cfg.invertY=cfg.invertZ=invert;
           cfg.presenceEnabled=presence;cfg.spankEnabled=spank;
           auto gesture=virtual_editor::gesture(field,cfg);
+          assert(gesture.nearMm==cfg.near && gesture.farMm==cfg.far);
           char wire[1024];auto n=bearamin_virtual::frameLine(wire,sizeof(wire),1,++cases,1000000,mm,status,&gesture);
           assert(n>0 && n<1024);output.write(wire,n);
         }

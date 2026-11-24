@@ -10,8 +10,8 @@ test('mirror help matches the device firmware defaults',()=>{assert.match(ui("li
 
 test('Virtual describes firmware and Rack requirements and automatic existing-patch behavior',()=>{
  const view=ui('virtual');
- assert.match(view.midi,/Bearamin 2\.1\.2/);
- assert.match(view.midi,/firmware 0\.3\.0\.5/);
+ assert.match(view.midi,/Bearamin 2\.1\.3/);
+ assert.match(view.midi,/firmware 0\.3\.0\.6/);
  assert.match(view.midi,/apply automatically in new and existing Rack modules/);
  assert.match(view.midi,/Gesture smoothing/);
  assert.match(view.help.smoothing,/MIDI and VCV/);

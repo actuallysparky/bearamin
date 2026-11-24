@@ -35,6 +35,8 @@ inline bearamin_virtual::Gesture gesture(const bearfield::ProcessedFieldState& f
   result.z = mapAxis12(field.zNorm12, settings.curveZ, settings.invertZ);
   result.centroidX = field.xMilli;
   result.centroidY = field.yMilli;
+  result.nearMm = settings.near;
+  result.farMm = settings.far;
   result.present = field.present;
   result.presence = field.present && settings.presenceEnabled;
   result.spank = field.present && field.spankHeld && settings.spankEnabled;

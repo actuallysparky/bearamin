@@ -15,7 +15,7 @@ pico_enable_stdio_usb(bearamin_virtual_2040 0)
 pico_enable_stdio_uart(bearamin_virtual_2040 0)
 pico_add_extra_outputs(bearamin_virtual_2040)
 
-set(BEARAMIN_VERSION "0.3.0.5")
+set(BEARAMIN_VERSION "0.3.0.6")
 string(REPLACE "." ";" BEARAMIN_VERSION_PARTS "${BEARAMIN_VERSION}")
 foreach(i RANGE 0 3)
   list(GET BEARAMIN_VERSION_PARTS ${i} component)

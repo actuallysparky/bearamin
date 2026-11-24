@@ -100,6 +100,7 @@ void editorFlushPreview(){
  if(!previewCadence.active(uint32_t(time_us_64()/1000))||time_us_64()-previewDepth.capturedUs>bearamin_safety::kFreshFrameUs){++previewDropped;return;}
  editorArena.used=0;JsonDocument d(&editorArena);d["op"]="field";d["uid"]=editorUid;auto a=d["data"].to<JsonObject>();
  a["seq"]=previewDepth.sequence;a["captureUs"]=previewDepth.capturedUs;
+ a["near"]=config.near;a["far"]=config.far;
  auto mm=a["mm"].to<JsonArray>();for(unsigned i=0;i<64;++i){if((previewDepth.validMask>>i)&1)mm.add(previewDepth.distanceMm[i]);else mm.add(nullptr);}
  a["x"]=virtual_editor::mapAxis(previewField.xNorm12,config.curveX,config.invertX);a["y"]=virtual_editor::mapAxis(previewField.yNorm12,config.curveY,config.invertY);a["z"]=virtual_editor::mapAxis(previewField.zNorm12,config.curveZ,config.invertZ);a["presence"]=previewField.present;a["spank"]=previewField.spankHeld;editorQueue(d,true);
 }

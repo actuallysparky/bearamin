@@ -1,4 +1,4 @@
-<!-- {"canonical_sha256": "296ecef8d96a0026bfc0231df1ea08da751ec00e11a24227a8433bd1b79b3940", "canonical_source": "engineering:Bearamin-publication/bearamin-virtual/README.md", "editing": "Edit the canonical Obsidian source; regenerate this copy.", "generated": true, "vault_commit": null} -->
+<!-- {"canonical_sha256": "eafcdc9a38f2660c05a792e3fc3959e8de7248b3a9a91fd3ac9b40d8a119e4bf", "canonical_source": "engineering:Bearamin-publication/bearamin-virtual/README.md", "editing": "Edit the canonical Obsidian source; regenerate this copy.", "generated": true, "vault_commit": null} -->
 
 # Bearamin Virtual
 
@@ -41,3 +41,5 @@ The Rack plugin is version **2.0.1**, licensed under **GPL-3.0-or-later**. The s
 Download the matching `.vcvplugin` package from the [Rack plugin release](https://github.com/actuallysparky/bearamin/releases/tag/rack-BearaminVirtual-2.0.1). Packages are available for Windows x64, Linux x64 (glibc 2.34+), Intel Mac x64 and Apple Silicon Mac ARM64. Close Rack, place the matching package in its user folder's `plugins-win-x64`, `plugins-lin-x64`, `plugins-mac-x64` or `plugins-mac-arm64` directory, and restart Rack. Requires the Bearamin Virtual RP2040-Zero and VL53L7CX sensor; the plugin reads its USB serial stream.
 
 From the repository root, run `make RACK_DIR=/path/to/Rack-SDK dist` to build the Rack package. The root build forwards to `bearamin-virtual/vcv/BearaminVirtual/` and publishes its output in the root `dist/` directory. Linux and Windows native builds and wire/protocol/output tests passed. All four packages have verified architecture, manifest, license contents and checksums. Physical controller operation in Rack has been confirmed on macOS ARM64; Windows, Linux and Intel Mac still need live controller/Rack testing.
+
+With Virtual firmware 0.3.0.6 and Rack plugin 2.1.3, the Field Guide and Rack grids use the saved Near/Far distances. Near is full brightness, Far is the dim edge, and farther cells are inactive. Unsaved edits do not alter the live preview. CV processing is unchanged. Older Virtual firmware remains usable; Rack falls back to its previous display range when range metadata is absent.

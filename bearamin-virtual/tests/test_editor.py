@@ -74,6 +74,7 @@ int main(){
  bearfield::ProcessedFieldState field{};field.present=true;field.zNorm12=2000;
  editorPreview(depth,field);depth.sequence=101;editorPreview(depth,field);assert(previewPending&&previewDropped>0);editorFlushPreview();
  virtual_editor::Decoder snap;for(size_t i=0;i<editorLength;++i)snap.feed(editorWire[i],100);JsonDocument snapshot;assert(!deserializeJson(snapshot,snap.json)&&snapshot["data"]["seq"]==101);
+ assert(snapshot["data"]["near"]==config.near && snapshot["data"]["far"]==config.far);
  // At a message boundary performance MIDI precedes preview, even under a
  // one-packet FIFO budget. A started SysEx is never interleaved/truncated.
  tx.clear();packets.clear();midiOutput.queue(0xb2,82,70);txBudget=1;editorService(true);assert(packets.size()==1&&packets[0][1]==0xb2&&packets[0][2]==82&&packets[0][3]==70);assert(editorOffset==0);

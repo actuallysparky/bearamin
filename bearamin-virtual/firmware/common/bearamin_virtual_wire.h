@@ -8,6 +8,7 @@ namespace bearamin_virtual {
 // Optional device-processed gestures. Raw v1 depths remain unchanged for legacy clients.
 struct Gesture {
   uint16_t x = 0, y = 0, z = 0, centroidX = 0, centroidY = 0;
+  uint16_t nearMm = 60, farMm = 600;
   bool present = false, presence = false, spank = false;
   unsigned rotation = 0;
   bool mirror = false;
@@ -38,9 +39,10 @@ inline size_t frameLine(char *out, size_t capacity, uint32_t boot, uint32_t seq,
   if (gesture) {
     n = std::snprintf(out + used, capacity - used,
         "],\"gesture\":{\"v\":1,\"x\":%u,\"y\":%u,\"z\":%u,"
-        "\"cx\":%u,\"cy\":%u,\"present\":%s,\"presence\":%s,\"spank\":%s,\"rotation\":%u,\"mirror\":%s}}\n",
+        "\"cx\":%u,\"cy\":%u,\"near\":%u,\"far\":%u,\"present\":%s,\"presence\":%s,\"spank\":%s,\"rotation\":%u,\"mirror\":%s}}\n",
         unsigned(gesture->x), unsigned(gesture->y), unsigned(gesture->z),
         unsigned(gesture->centroidX), unsigned(gesture->centroidY),
+        unsigned(gesture->nearMm), unsigned(gesture->farMm),
         gesture->present ? "true" : "false", gesture->presence ? "true" : "false",
         gesture->spank ? "true" : "false", gesture->rotation,
         gesture->mirror ? "true" : "false");

@@ -13,6 +13,10 @@ int main() {
     assert(std::strstr(line,"\"mm\":[null,null,null,2000,421") != nullptr);
     assert(std::strstr(line,"\"boot\":123,\"seq\":42,\"capture_us\":2800042") != nullptr);
     assert(bearamin_virtual::frameLine(line,40,123,42,1,mm,status)==0);
+    bearamin_virtual::Gesture gesture;gesture.nearMm=100;gesture.farMm=300;
+    n=bearamin_virtual::frameLine(line,sizeof(line),UINT32_MAX,UINT32_MAX,UINT64_MAX,mm,status,&gesture);
+    assert(n>0 && n<1024);
+    assert(std::strstr(line,"\"near\":100,\"far\":300") != nullptr);
     n=bearamin_virtual::statusLine(line,sizeof(line),1,2,3,true);
     assert(n>0 && std::strstr(line,"\"state\":\"sensor_fault\"") != nullptr);
     assert(std::strstr(line,"\"mm\"")==nullptr);
